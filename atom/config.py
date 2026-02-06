@@ -570,6 +570,13 @@ class QuantizationConfig:
 
 _CONFIG_REGISTRY: dict[str, str] = {
     "deepseek_v32": "deepseek_v3",
+    "kimi_k2": "deepseek_v3",
+}
+
+
+_MULTIMODAL_MODEL_TYPES: dict[str, str] = {
+    # Maps multimodal model_type -> key in config_dict for the text sub-config
+    "kimi_k25": "text_config",
 }
 
 
@@ -584,6 +591,32 @@ def get_hf_config(model: str) -> PretrainedConfig:
         if token and token.strip():
             return token
         return None
+
+    # For multimodal models, extract the text sub-config so the rest of ATOM
+    # (which is text-only today) works transparently.
+    if model_type in _MULTIMODAL_MODEL_TYPES:
+        text_config_key = _MULTIMODAL_MODEL_TYPES[model_type]
+        text_config_dict = config_dict.get(text_config_key, {}).copy()
+        # Remove auto_map to avoid trust_remote_code issues
+        text_config_dict.pop("auto_map", None)
+        # Propagate quantization_config from root level into text config
+        # (quantization_config lives alongside text_config, not inside it).
+        if "quantization_config" not in text_config_dict and "quantization_config" in config_dict:
+            text_config_dict["quantization_config"] = config_dict["quantization_config"]
+        text_model_type = text_config_dict.get("model_type", "deepseek_v3")
+        mapped_type = _CONFIG_REGISTRY.get(text_model_type, text_model_type)
+        config_class = AutoConfig.for_model(mapped_type)
+        hf_config = config_class.from_dict(text_config_dict)
+        # Override architectures so that ATOM selects the correct model class
+        # which can handle the multimodal weight prefix during loading.
+        original_arch = config_dict.get("architectures", [])
+        if original_arch:
+            hf_config.architectures = original_arch
+        # Propagate top-level token IDs if missing in text config
+        for field in ("bos_token_id", "eos_token_id", "pad_token_id"):
+            if getattr(hf_config, field, None) is None and field in config_dict:
+                setattr(hf_config, field, config_dict[field])
+        return hf_config
 
     if model_type in _CONFIG_REGISTRY:
         config_class = AutoConfig.for_model(_CONFIG_REGISTRY[model_type])
