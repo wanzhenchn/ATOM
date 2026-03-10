@@ -6,7 +6,7 @@
 #############################################
 
 MODEL_NAME="deepseek-ai/DeepSeek-R1-0528"
-MODEL_LOCAL_PATH="/data/deepseek-ai/DeepSeek-R1-0528"
+MODEL_LOCAL_PATH="/models/deepseek-ai/DeepSeek-R1-0528"
 TENSOR_PARALLEL=8
 KV_CACHE_DTYPE="fp8"
 TEMPERATURE=0
