@@ -55,16 +55,17 @@ jobs:
       KV_CACHE_DTYPE: "fp8"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Clean up existing containers
+      - name: Kill all Docker containers and clean up workspace
         run: |
+          echo "=== Cleaning up containers on $(hostname) ==="
           containers=$(docker ps -q)
           if [ -n "$containers" ]; then
             docker kill $containers || true
           fi
-          docker rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "ls -la /workspace/ && rm -rf /workspace/*" || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: GPU status
         run: |
