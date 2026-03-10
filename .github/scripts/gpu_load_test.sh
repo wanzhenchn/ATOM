@@ -6,7 +6,7 @@
 #############################################
 
 MODEL_NAME="deepseek-ai/DeepSeek-R1-0528"
-MODEL_LOCAL_PATH="/models/deepseek-ai/DeepSeek-R1-0528"
+MODEL_LOCAL_PATH="/data/deepseek-ai/DeepSeek-R1-0528"
 TENSOR_PARALLEL=8
 KV_CACHE_DTYPE="fp8"
 TEMPERATURE=0
@@ -24,11 +24,11 @@ echo ""
 # Check if model exists locally
 echo "Checking for model..."
 if [ -f "$MODEL_LOCAL_PATH/config.json" ]; then
-    echo "Found model locally at: $MODEL_LOCAL_PATH"
+    echo "✅ Found model locally at: $MODEL_LOCAL_PATH"
     MODEL_PATH="$MODEL_LOCAL_PATH"
 else
-    echo "Model not found locally"
-    echo "Will download from HuggingFace: $MODEL_NAME"
+    echo "❌ Model not found locally"
+    echo "📥 Will download from HuggingFace: $MODEL_NAME"
     MODEL_PATH="$MODEL_NAME"
 fi
 
@@ -44,7 +44,7 @@ if command -v rocm-smi &> /dev/null; then
     echo "Temperatures:"
     rocm-smi --showtemp 2>&1 | grep "Temperature (Sensor junction)" | head -8
 else
-    echo "rocm-smi not available"
+    echo "⚠️  rocm-smi not available"
 fi
 echo ""
 
@@ -111,7 +111,7 @@ echo ""
 LOAD_COUNT=$(grep -c "\[LOAD DONE\]" "$LOG_FILE" 2>/dev/null || echo 0)
 
 if [ "$LOAD_COUNT" -eq 0 ]; then
-    echo "FAIL: Test did not complete successfully"
+    echo "❌ Test did not complete successfully"
     echo "   No GPU load completion markers found in log"
     echo ""
     echo "Possible issues:"
@@ -124,13 +124,14 @@ if [ "$LOAD_COUNT" -eq 0 ]; then
 fi
 
 if [ "$LOAD_COUNT" -lt 8 ]; then
-    echo "WARNING: Only $LOAD_COUNT GPUs completed loading (expected 8)"
+    echo "⚠️  WARNING: Only $LOAD_COUNT GPUs completed loading (expected 8)"
     echo ""
 fi
 
 # Extract and analyze timing data
+echo "════════════════════════════════════════"
 echo "PER-GPU LOAD TIME ANALYSIS"
-echo "========================================="
+echo "════════════════════════════════════════"
 echo ""
 
 # Get all load times with GPU IDs
@@ -154,16 +155,16 @@ while IFS= read -r line; do
 
     # Determine status
     if (( $(echo "$DELTA < 1" | bc -l) )); then
-        STATUS="Excellent"
+        STATUS="✅ Excellent"
         MARKER=""
     elif (( $(echo "$DELTA < 5" | bc -l) )); then
-        STATUS="Good"
+        STATUS="✅ Good"
         MARKER=""
     elif (( $(echo "$DELTA < 10" | bc -l) )); then
-        STATUS="Moderate"
+        STATUS="⚠️  Moderate"
         MARKER="  <--"
     else
-        STATUS="SLOW"
+        STATUS="❌ SLOW"
         MARKER="  <-- PROBLEM"
     fi
 
@@ -173,8 +174,9 @@ done <<< "$LOAD_DATA"
 echo ""
 
 # Calculate comprehensive statistics
+echo "════════════════════════════════════════"
 echo "STATISTICAL SUMMARY"
-echo "========================================="
+echo "════════════════════════════════════════"
 echo ""
 
 STATS=$(grep "\[LOAD DONE\]" "$LOG_FILE" | grep -oP 'Duration: \K[0-9.]+' | awk '{
@@ -233,38 +235,78 @@ echo ""
 DELTA=$(echo "$STATS" | grep "^DELTA_VALUE:" | cut -d: -f2)
 VARIANCE=$(echo "$STATS" | grep "^VARIANCE_VALUE:" | cut -d: -f2)
 
-# Determine overall status
+# Determine overall status and provide detailed explanation
+echo "════════════════════════════════════════"
 echo "DIAGNOSTIC ASSESSMENT"
-echo "========================================="
+echo "════════════════════════════════════════"
 echo ""
 
 if (( $(echo "$DELTA < 1" | bc -l) )); then
-    echo "Status: EXCELLENT"
+    echo "Status: ✅ ✅ ✅ EXCELLENT"
     echo ""
-    echo "All GPUs loaded within ${DELTA}s of each other."
-    echo "All GPUs are loading the model simultaneously."
-    echo "No GPU hardware issues detected."
+    echo "All GPUs loaded within ${DELTA}s of each other!"
+    echo ""
+    echo "What this means:"
+    echo "  • All GPUs are loading the model simultaneously"
+    echo "  • No GPU hardware issues detected"
+    echo "  • Perfect load balance across all GPUs"
+    echo "  • This is optimal performance"
+    echo ""
+    echo "Interpretation:"
+    echo "  - Variance <1%: Outstanding synchronization"
+    echo "  - All GPUs have equal PCIe bandwidth"
+    echo "  - Storage I/O is well-balanced"
+    echo "  - No thermal throttling or memory issues"
 
 elif (( $(echo "$DELTA < 5" | bc -l) )); then
-    echo "Status: GOOD"
+    echo "Status: ✅ GOOD"
     echo ""
     echo "All GPUs loaded within ${DELTA}s variance."
-    echo "Minor variance detected but within acceptable range."
+    echo ""
+    echo "What this means:"
+    echo "  • Minor variance detected but within acceptable range"
+    echo "  • No significant hardware issues"
+    echo "  • GPUs are mostly synchronized"
+    echo ""
+    echo "Interpretation:"
+    echo "  - Variance 1-5s: Normal variation"
+    echo "  - Could be due to:"
+    echo "    * Minor storage I/O fluctuations"
+    echo "    * Normal system load variations"
+    echo "    * RCCL initialization timing"
+    echo "  - No action needed unless consistent across multiple runs"
 
 elif (( $(echo "$DELTA < 10" | bc -l) )); then
-    echo "Status: MODERATE VARIANCE"
+    echo "Status: ⚠️  MODERATE VARIANCE"
     echo ""
     echo "Delta is ${DELTA}s - some imbalance detected."
-    echo "Recommended: run test again to check if same GPUs are slow."
+    echo ""
+    echo "What this means:"
+    echo "  • Some GPUs loading noticeably slower than others"
+    echo "  • Not critical but worth investigating"
+    echo "  • May indicate underlying issue"
+    echo ""
+    echo "Recommended actions:"
+    echo "  1. Check which specific GPUs are slower (see table above)"
+    echo "  2. Run test again to see if same GPUs are slow"
+    echo "  3. If consistent, investigate:"
+    echo "     - Storage I/O patterns"
+    echo "     - PCIe link status"
+    echo "     - Memory usage on those GPUs"
+    echo ""
+    echo "Possible causes:"
+    echo "  • Storage I/O contention"
+    echo "  • Different model shard sizes"
+    echo "  • Cache effects (first run vs subsequent runs)"
 
 else
-    echo "Status: HIGH VARIANCE - ISSUE DETECTED"
+    echo "Status: ❌ ❌ ❌ HIGH VARIANCE - ISSUE DETECTED"
     echo ""
     echo "Delta is ${DELTA}s - significant GPU load imbalance!"
     echo ""
 
     # Identify slow GPUs
-    SLOW_GPUS=$(echo "$LOAD_DATA" | awk -v min="$MIN_TIME" '{
+    SLOW_GPUS=$(echo "$LOAD_DATA" | awk -v max="$MAX_TIME" -v min="$MIN_TIME" '{
         time = $3;
         gsub(/s$/, "", time);
         if(time > min + 10) {
@@ -273,24 +315,123 @@ else
     }' | tr '\n' ',' | sed 's/,$//')
 
     if [ -n "$SLOW_GPUS" ]; then
-        echo "Slow GPU(s) identified: $SLOW_GPUS"
+        echo "🔴 Slow GPU(s) identified: $SLOW_GPUS"
+        echo ""
+        echo "These GPUs took significantly longer to load the model."
+        echo "Difference: $(awk "BEGIN {printf \"%.1f\", ($MAX_TIME - $MIN_TIME) / $MIN_TIME * 100}")% slower than fastest GPU"
         echo ""
     fi
 
-    echo "Most likely causes:"
-    echo "  1. Storage I/O bottleneck"
-    echo "  2. Model shard distribution"
-    echo "  3. NUMA/memory issues"
-    echo "  4. PCIe link degradation"
+    echo "═══════════════════════════════════════════════════════"
+    echo "PROBLEM ANALYSIS"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "What this HIGH VARIANCE means:"
+    echo "  • Some GPUs are loading 2x or more slower than others"
+    echo "  • This is NOT normal behavior"
+    echo "  • Indicates a bottleneck or hardware issue"
+    echo ""
+    echo "Most Likely Causes (in order of probability):"
+    echo ""
+    echo "1. ⚠️  STORAGE I/O BOTTLENECK (Most Common)"
+    echo "   - Model shards on different storage locations"
+    echo "   - Network mount latency for specific files"
+    echo "   - Storage cache miss for certain GPUs"
+    echo "   - I/O contention from other processes"
+    echo ""
+    echo "   How to verify:"
+    echo "     • Check if /data is NFS/network mounted:"
+    echo "       mount | grep /data"
+    echo "     • Monitor I/O during load:"
+    echo "       iostat -x 1"
+    echo "     • Check disk performance:"
+    echo "       dd if=/data/deepseek-ai/DeepSeek-R1-0528/model-00001-of-00030.safetensors of=/dev/null bs=1M count=1000"
+    echo ""
+    echo "2. ⚠️  MODEL SHARD DISTRIBUTION"
+    echo "   - Different shard sizes for different GPUs"
+    echo "   - Specific shards slower to load"
+    echo ""
+    echo "   How to verify:"
+    echo "     • Check shard file sizes:"
+    echo "       ls -lh /data/deepseek-ai/DeepSeek-R1-0528/*.safetensors"
+    echo ""
+    echo "3. ⚠️  NUMA/MEMORY ISSUES"
+    echo "   - Cross-NUMA memory access slower"
+    echo "   - Memory bandwidth saturation on specific socket"
+    echo ""
+    echo "   How to verify:"
+    echo "     • Check NUMA topology:"
+    echo "       rocm-smi --showtopo | grep 'Numa Node'"
+    echo "     • See if slow GPUs are on same NUMA node"
+    echo ""
+    echo "4. ⚠️  PCIe LINK DEGRADATION (Less Likely)"
+    echo "   - Reduced PCIe bandwidth on specific GPUs"
+    echo "   - Should be x16, might be x8 or lower"
+    echo ""
+    echo "   How to verify:"
+    echo "     • Check PCIe link width (if rocm-smi supports):"
+    echo "       lspci -vv | grep -A 10 'AMD/ATI' | grep LnkSta"
+    echo ""
+    echo "What this is UNLIKELY to be:"
+    echo "  ✗ GPU hardware failure (would cause errors/crashes)"
+    echo "  ✗ Thermal throttling (temps are normal)"
+    echo "  ✗ Memory errors (would see corruption)"
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "RECOMMENDED IMMEDIATE ACTIONS"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "1. 🔄 RUN TEST AGAIN to see if same GPUs are slow:"
+    echo "   ./test_gpu_load.sh"
+    echo ""
+    echo "   If SAME GPUs slow → Likely hardware/storage issue"
+    echo "   If DIFFERENT GPUs slow → Likely transient I/O issue"
+    echo ""
+    echo "2. 📊 CHECK STORAGE MOUNT:"
+    echo "   mount | grep /data"
+    echo "   df -h /data"
+    echo ""
+    echo "3. 🔍 MONITOR DURING LOAD:"
+    echo "   # In another terminal while test runs:"
+    echo "   watch -n 1 'rocm-smi --showuse'"
+    echo ""
+    echo "4. 💾 TEST WITH LOCAL STORAGE (if /data is network mount):"
+    echo "   # Copy model to local fast storage"
+    echo "   rsync -av /data/deepseek-ai/DeepSeek-R1-0528 /local/storage/"
+    echo "   # Modify script to use local path"
+    echo ""
 fi
 
 echo ""
-echo "========================================="
+echo "════════════════════════════════════════"
+echo "ADDITIONAL INFORMATION"
+echo "════════════════════════════════════════"
+echo ""
+echo "Understanding the metrics:"
+echo ""
+echo "• Delta: Time difference between fastest and slowest GPU"
+echo "  - <1s:   Excellent (all GPUs simultaneous)"
+echo "  - 1-5s:  Good (minor variance)"
+echo "  - 5-10s: Moderate (investigate if consistent)"
+echo "  - >10s:  High (likely bottleneck/issue)"
+echo ""
+echo "• Variance: Percentage variation from average"
+echo "  - <1%:   Outstanding synchronization"
+echo "  - 1-5%:  Normal variation"
+echo "  - 5-10%: Some imbalance"
+echo "  - >10%:  Significant imbalance"
+echo ""
+echo "• Load Time: Total time to load model shard onto GPU"
+echo "  - Typical for DeepSeek-R1: 300-800s depending on hardware"
+echo "  - Affected by: Storage speed, PCIe bandwidth, model size"
+echo ""
+
+echo "════════════════════════════════════════"
 echo "TEST SUMMARY"
-echo "========================================="
+echo "════════════════════════════════════════"
 echo "Hostname:     $(hostname)"
 echo "Test Date:    $(date)"
 echo "Model:        $MODEL_PATH"
 echo "GPUs Tested:  $LOAD_COUNT"
 echo "Full Log:     $LOG_FILE"
-echo "========================================="
+echo "════════════════════════════════════════"
