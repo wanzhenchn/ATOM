@@ -55,6 +55,7 @@ support_model_arch_dict = {
     "DeepseekV3ForCausalLM": "atom.models.deepseek_v2.DeepseekV2ForCausalLM",
     "DeepseekV32ForCausalLM": "atom.models.deepseek_v2.DeepseekV2ForCausalLM",
     "GptOssForCausalLM": "atom.models.gpt_oss.GptOssForCausalLM",
+    "GlmMoeDsaForCausalLM": "atom.models.deepseek_v2.GlmMoeDsaForCausalLM",
     "Glm4MoeForCausalLM": "atom.models.glm4_moe.Glm4MoeForCausalLM",
     "Qwen3NextForCausalLM": "atom.models.qwen3_next.Qwen3NextForCausalLM",
 }
@@ -613,6 +614,7 @@ class ModelRunner:
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_mtp",
+            "glm_moe_dsa",
         ):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
