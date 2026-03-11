@@ -22,7 +22,6 @@ concurrency:
 
 env:
   ATOM_BASE_IMAGE: rocm/pytorch:latest
-  AITER_S3_BUCKET: s3://framework-whls-nightlies/whl-staging/gfx942-gfx950
   GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/ROCm/ATOM.git' }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
 
@@ -155,40 +154,41 @@ jobs:
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Download latest aiter wheel from CI artifacts
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: us-east-1
-          role-to-assume: arn:aws:iam::661452401056:role/framework-aiter-nightlies
-
-      - name: Download latest aiter wheel from S3
-        if: matrix.run_on_pr == true || github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if ! command -v aws &> /dev/null; then
-            curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install
-            rm -rf awscliv2.zip aws
-          fi
+          echo "=== Finding latest aiter-whl-main artifact from ROCm/aiter ==="
 
-          echo "=== Finding latest amd-aiter wheel from S3 ==="
-          LATEST_WHL=$(aws s3 ls ${{ env.AITER_S3_BUCKET }}/ \
-            | grep 'amd_aiter.*\.whl' \
-            | sort -k1,2 \
-            | tail -1 \
-            | awk '{print $4}')
+          ARTIFACT_JSON=$(gh api "repos/ROCm/aiter/actions/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | sort_by(.created_at) | last')
 
-          if [ -z "$LATEST_WHL" ]; then
-            echo "ERROR: No amd-aiter wheel found in S3 bucket"
+          ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
+          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
+
+          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
+            echo "ERROR: No aiter-whl-main artifact found"
             exit 1
           fi
 
-          echo "Latest wheel: $LATEST_WHL"
-          aws s3 cp ${{ env.AITER_S3_BUCKET }}/$LATEST_WHL /tmp/$LATEST_WHL
-          echo "AITER_WHL_PATH=/tmp/$LATEST_WHL" >> $GITHUB_ENV
-          echo "AITER_WHL_NAME=$LATEST_WHL" >> $GITHUB_ENV
+          echo "Artifact: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
+          echo "=== Downloading artifact ==="
+          mkdir -p /tmp/aiter-whl
+          gh api "repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/aiter-whl.zip
+          unzip -o /tmp/aiter-whl.zip -d /tmp/aiter-whl
+          rm -f /tmp/aiter-whl.zip
+
+          AITER_WHL=$(ls /tmp/aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
+          if [ -z "$AITER_WHL" ]; then
+            echo "ERROR: No amd_aiter wheel found in artifact"
+            ls -la /tmp/aiter-whl/
+            exit 1
+          fi
+
+          echo "Downloaded wheel: $AITER_WHL"
+          echo "AITER_WHL_PATH=$AITER_WHL" >> $GITHUB_ENV
 
       - name: Start CI container
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
@@ -246,11 +246,12 @@ jobs:
         run: |
           docker exec "$CONTAINER_NAME" df -h /dev/shm
 
-      - name: Install aiter from S3 wheel
+      - name: Install aiter from wheel
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         run: |
           echo "=== Copying wheel into container ==="
-          docker cp "${{ env.AITER_WHL_PATH }}" "$CONTAINER_NAME:/tmp/${{ env.AITER_WHL_NAME }}"
+          WHL_NAME=$(basename "${{ env.AITER_WHL_PATH }}")
+          docker cp "${{ env.AITER_WHL_PATH }}" "$CONTAINER_NAME:/tmp/$WHL_NAME"
 
           docker exec "$CONTAINER_NAME" bash -lc "
             set -euo pipefail
@@ -258,7 +259,7 @@ jobs:
             pip uninstall -y amd-aiter || true
 
             echo '=== Installing amd-aiter from wheel ==='
-            pip install /tmp/${{ env.AITER_WHL_NAME }}
+            pip install /tmp/$WHL_NAME
 
             echo '=== Installed amd-aiter version ==='
             pip show amd-aiter
