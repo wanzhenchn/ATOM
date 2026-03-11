@@ -865,10 +865,7 @@ class ModelRunner:
 
     def allocate_forward_vars(self):
         config = self.config
-        _hf_cfg = config.hf_config
-        hidden_size = getattr(_hf_cfg, "hidden_size", None) or getattr(
-            getattr(_hf_cfg, "text_config", None), "hidden_size", None
-        )
+        hidden_size = config.hf_config.hidden_size
         hidden_type = config.torch_dtype
         self.max_bs = self.config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
