@@ -21,7 +21,8 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  ATOM_BASE_NIGTHLY_IMAGE: rocm/atom-dev:latest
+  ATOM_BASE_IMAGE: rocm/pytorch:latest
+  AITER_S3_BUCKET: s3://framework-whls-nightlies/whl-staging/gfx942-gfx950
   GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/ROCm/ATOM.git' }}
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
 
@@ -32,74 +33,8 @@ jobs:
       black: true
       ruff: true
 
-  build_atom_image:
-    if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
-    needs: [pre-checks]
-    name: Build ATOM image
-    runs-on: build-only-atom
-    steps:
-      - name: Checkout ATOM repo
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: actions/checkout@v4
-
-      - name: Generate Dockerfile
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          cat <<EOF > Dockerfile.mod
-          FROM ${{ env.ATOM_BASE_NIGTHLY_IMAGE }}
-          RUN pip install -U lm-eval[api]
-          RUN pip show lm-eval || true
-          RUN pip install hf_transfer
-          RUN pip show hf_transfer || true
-          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show amd-aiter || true
-          RUN pip uninstall -y amd-aiter
-          RUN pip install --upgrade "pybind11>=3.0.1"
-          RUN pip show pybind11
-          RUN wget https://github.com/stedolan/jq/releases/download/jq-1.7/jq-linux64 -O jq
-          RUN chmod +x jq
-          RUN mv jq /usr/local/bin/jq
-          RUN rm -rf /app/aiter-test
-          RUN git clone --depth 1 https://github.com/ROCm/aiter.git /app/aiter-test && \\
-              cd /app/aiter-test && \\
-              git checkout HEAD && \\
-              git submodule sync && git submodule update --init --recursive && \\
-              MAX_JOBS=64 PREBUILD_KERNELS=0 GPU_ARCHS=gfx950 python3 setup.py develop
-          RUN echo "=== Aiter version AFTER installation ===" && pip show amd-aiter || true
-          
-          RUN echo "=== ATOM version BEFORE uninstall ===" && pip show atom || true
-          RUN pip uninstall -y atom
-          RUN rm -rf /app/ATOM
-          RUN git clone ${{ env.GITHUB_REPO_URL }} /app/ATOM && \\
-              cd /app/ATOM && \\
-              git checkout ${{ env.GITHUB_COMMIT_SHA }} && \\
-              pip install -e .
-
-          RUN echo "=== ATOM version AFTER installation ===" && pip show atom || true
-          EOF
-
-      - name: Build Docker image 
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          docker build --pull --network=host \
-            --no-cache \
-            -t atom_test:ci \
-            -f Dockerfile.mod .
-
-      - name: Push Docker image
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          IMAGE_TAG=rocm/atom-dev:pre-build-${{ env.GITHUB_COMMIT_SHA }}
-          docker tag atom_test:ci $IMAGE_TAG
-          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-          docker push $IMAGE_TAG
-
-      - name: Success message
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          echo "Successfully prepared image: $IMAGE_TAG"
-
   atom:
-    needs: [pre-checks, build_atom_image]
+    needs: [pre-checks]
     name: ATOM Test
     strategy:
       fail-fast: false
@@ -220,51 +155,6 @@ jobs:
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         uses: actions/checkout@v4
       
-      - name: Docker Login
-        if: (matrix.run_on_pr == true || github.event_name != 'pull_request') && !github.event.pull_request.head.repo.fork
-        run: |
-          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Generate Dockerfile for forked repo
-        if: (matrix.run_on_pr == true || github.event_name != 'pull_request') && github.event.pull_request.head.repo.fork
-        run: |
-          cat <<EOF > Dockerfile.mod
-          FROM ${{ env.ATOM_BASE_NIGTHLY_IMAGE }}
-          RUN pip install -U lm-eval[api]
-          RUN pip show lm-eval || true
-          RUN pip install hf_transfer
-          RUN pip show hf_transfer || true
-          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show amd-aiter || true
-          RUN pip uninstall -y amd-aiter
-          RUN pip install --upgrade "pybind11>=3.0.1"
-          RUN pip show pybind11
-          RUN rm -rf /app/aiter-test
-          RUN git clone https://github.com/ROCm/aiter.git /app/aiter-test && \\
-              cd /app/aiter-test && \\
-              git checkout HEAD && \\
-              git submodule sync && git submodule update --init --recursive && \\
-              MAX_JOBS=64 PREBUILD_KERNELS=0 GPU_ARCHS=gfx950 python3 setup.py develop
-          RUN echo "=== Aiter version AFTER installation ===" && pip show amd-aiter || true
-          
-          RUN echo "=== ATOM version BEFORE uninstall ===" && pip show atom || true
-          RUN pip uninstall -y atom
-          RUN rm -rf /app/ATOM
-          RUN git clone ${{ env.GITHUB_REPO_URL }} /app/ATOM && \\
-              cd /app/ATOM && \\
-              git checkout ${{ env.GITHUB_COMMIT_SHA }} && \\
-              pip install -e .
-
-          RUN echo "=== ATOM version AFTER installation ===" && pip show atom || true
-          EOF
-
-      - name: Build Docker image for forked repo
-        if: (matrix.run_on_pr == true || github.event_name != 'pull_request') && github.event.pull_request.head.repo.fork
-        run: |
-          docker build --pull --network=host \
-            --no-cache \
-            -t atom_test:ci \
-            -f Dockerfile.mod .
-
       - name: Start CI container
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         run: |
@@ -289,16 +179,10 @@ jobs:
           ${{ matrix.env_vars }}
           EOF
 
-          echo "Starting container: atom_test:ci"
+          IMAGE_TAG=${{ env.ATOM_BASE_IMAGE }}
+          echo "Starting container with image: $IMAGE_TAG"
           echo "Model-specific environment variables for ${{ matrix.model_name }}:"
           cat /tmp/env_file.txt
-
-          if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
-            IMAGE_TAG=atom_test:ci
-          else
-            IMAGE_TAG=rocm/atom-dev:pre-build-${{ env.GITHUB_COMMIT_SHA }}
-          fi
-
 
           docker run -dt --device=/dev/kfd $DEVICE_FLAG \
           -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
@@ -326,6 +210,55 @@ jobs:
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         run: |
           docker exec "$CONTAINER_NAME" df -h /dev/shm
+
+      - name: Install aiter from S3 wheel
+        if: matrix.run_on_pr == true || github.event_name != 'pull_request'
+        run: |
+          docker exec "$CONTAINER_NAME" bash -lc "
+            set -euo pipefail
+            pip install awscli 2>/dev/null || true
+
+            echo '=== Finding latest amd-aiter wheel from S3 ==='
+            LATEST_WHL=\$(aws s3 ls ${{ env.AITER_S3_BUCKET }}/ --no-sign-request \
+              | grep 'amd_aiter.*\.whl' \
+              | sort -k1,2 \
+              | tail -1 \
+              | awk '{print \$4}')
+
+            if [ -z \"\$LATEST_WHL\" ]; then
+              echo 'ERROR: No amd-aiter wheel found in S3 bucket'
+              exit 1
+            fi
+
+            echo \"Latest wheel: \$LATEST_WHL\"
+            echo '=== Downloading wheel ==='
+            aws s3 cp ${{ env.AITER_S3_BUCKET }}/\$LATEST_WHL /tmp/\$LATEST_WHL --no-sign-request
+
+            echo '=== Uninstalling existing amd-aiter ==='
+            pip uninstall -y amd-aiter || true
+
+            echo '=== Installing amd-aiter from wheel ==='
+            pip install /tmp/\$LATEST_WHL
+
+            echo '=== Installed amd-aiter version ==='
+            pip show amd-aiter
+          "
+
+      - name: Install ATOM and dependencies
+        if: matrix.run_on_pr == true || github.event_name != 'pull_request'
+        run: |
+          docker exec "$CONTAINER_NAME" bash -lc "
+            set -euo pipefail
+            pip install -U 'lm-eval[api]'
+            pip install hf_transfer
+            pip install --upgrade 'pybind11>=3.0.1'
+
+            echo '=== Installing ATOM ==='
+            cd /workspace
+            pip install -e .
+            echo '=== Installed ATOM version ==='
+            pip show atom
+          "
 
       - name: Download models
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
