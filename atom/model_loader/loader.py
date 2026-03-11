@@ -180,9 +180,10 @@ def load_model(
 
             layerId_ = re.search(r"model\.layers\.(\d+)\.", name)
             layerId = int(layerId_.group(1)) if layerId_ else 0
+            _num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
             if (
-                hf_config.num_hidden_layers
-                and layerId >= hf_config.num_hidden_layers
+                _num_hidden_layers
+                and layerId >= _num_hidden_layers
                 and not spec_decode
             ):
                 continue

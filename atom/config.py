@@ -864,6 +864,19 @@ class Config:
 
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = get_hf_config(self.model)
+        # For VLM configs (e.g. Gemma3ForConditionalGeneration) that store
+        # language-model attributes under text_config, promote them to the
+        # top level so the rest of ATOM can access them uniformly.
+        _text_cfg = getattr(self.hf_config, "text_config", None)
+        if _text_cfg is not None:
+            for _attr in (
+                "hidden_size", "num_attention_heads", "num_key_value_heads",
+                "num_hidden_layers", "head_dim", "max_position_embeddings",
+                "rope_scaling", "rope_theta", "rope_type",
+                "intermediate_size", "num_local_experts",
+            ):
+                if not hasattr(self.hf_config, _attr) and hasattr(_text_cfg, _attr):
+                    setattr(self.hf_config, _attr, getattr(_text_cfg, _attr))
         if not hasattr(self.hf_config, "rope_parameters"):
             # Compatible with both transformers < 5
             rope_params = getattr(self.hf_config, "rope_scaling", {})

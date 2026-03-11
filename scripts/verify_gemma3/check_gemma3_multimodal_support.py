@@ -32,7 +32,7 @@ if os.path.isdir(_aiter_dir):
         sys.path.insert(0, _aiter_dir)
 
 # Default HuggingFace model id for Gemma 3 multimodal (4B instruction-tuned)
-DEFAULT_VLM_MODEL = "google/gemma-3-4b-it"
+DEFAULT_VLM_MODEL = "/data/models/gemma-3-4b-it" #"google/gemma-3-4b-it"
 GEMMA3_VLM_ARCH = "Gemma3ForConditionalGeneration"
 GEMMA3_TEXT_ARCH = "Gemma3ForCausalLM"
 

@@ -5,7 +5,9 @@
 # Adapted from vLLM's gemma3.py for ATOM.
 # Text-only Gemma 3 (Gemma3ForCausalLM) with sliding / full attention and
 # GemmaRMSNorm, GELU-tanh MLP, embedding scaling.
-from typing import Optional, Union
+# Multimodal Gemma 3 (Gemma3ForConditionalGeneration) with SigLIP vision
+# encoder and multi-modal projector (adapted from vLLM's gemma3_mm.py).
+from typing import Iterable, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -18,10 +20,12 @@ from atom.model_ops.base_attention import Attention
 from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
 from atom.model_ops.layernorm import GemmaRMSNorm
 from atom.model_ops.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
+from atom.model_loader.loader import default_weight_loader
 from atom.models.utils import (
     IntermediateTensors,
     PPMissingLayer,
@@ -36,6 +40,12 @@ try:
     from transformers import Gemma3TextConfig
 except ImportError:
     Gemma3TextConfig = None  # type: ignore[misc, assignment]
+
+try:
+    from transformers import Gemma3Config, SiglipVisionConfig
+except ImportError:
+    Gemma3Config = None  # type: ignore[misc, assignment]
+    SiglipVisionConfig = None  # type: ignore[misc, assignment]
 
 
 class Gemma3MLP(nn.Module):
@@ -163,8 +173,12 @@ class Gemma3Attention(nn.Module):
         else:
             rope_theta = rope_params.get("rope_theta", 10000.0)
             rope_scaling = rope_params
-            # If rope_scaling contains rope_type aiter does not support, fall back to None
-            if isinstance(rope_scaling, dict) and rope_scaling.get("rope_type") == "default":
+            # If rope_scaling contains rope_type aiter does not support, fall back to None.
+            # "linear" is also excluded because aiter's LinearScalingRotaryEmbedding
+            # returns a concatenated cache tensor rather than (cos, sin), causing an unpack
+            # error in RotaryEmbeddingBase.__init__. Use base theta without scaling instead.
+            _unsupported = {"default", "linear"}
+            if isinstance(rope_scaling, dict) and rope_scaling.get("rope_type") in _unsupported:
                 rope_scaling = None
 
         self.rotary_emb = get_rope(
@@ -430,3 +444,394 @@ class Gemma3ForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         return self.lm_head(hidden_states)
+
+
+# ── SigLIP Vision Encoder (for Gemma 3 multimodal) ────────────────────────
+# Adapted from vLLM's siglip.py / gemma3_mm.py.
+
+class SiglipVisionEmbeddings(nn.Module):
+    def __init__(self, config: "SiglipVisionConfig") -> None:
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.image_size = config.image_size
+        self.patch_size = config.patch_size
+        self.patch_embedding = nn.Conv2d(
+            in_channels=config.num_channels,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            padding=0,
+            bias=True,
+        )
+        self.num_patches = (self.image_size // self.patch_size) ** 2
+        self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
+        self.register_buffer(
+            "position_ids",
+            torch.arange(self.num_patches, dtype=torch.int64).unsqueeze(0),
+            persistent=False,
+        )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        embeddings = embeddings + self.position_embedding(self.position_ids)
+        return embeddings
+
+
+class SiglipAttention(nn.Module):
+    """Full (non-cached) self-attention for SigLIP encoder layers."""
+
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=self.num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.out_proj = RowParallelLinear(
+            input_size=self.embed_dim,
+            output_size=self.embed_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads_per_partition = max(1, self.num_heads // tp_size)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        bsz, seq_len, _ = hidden_states.shape
+        qkv = self.qkv_proj(hidden_states)
+        q_size = self.num_heads_per_partition * self.head_dim
+        kv_size = q_size
+        q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+        q = q.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, seq_len, self.num_heads_per_partition, self.head_dim).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+        return self.out_proj(attn_out)
+
+
+class SiglipMLP(nn.Module):
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = F.gelu(hidden_states, approximate="none")
+        return self.fc2(hidden_states)
+
+
+class SiglipEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.self_attn = SiglipAttention(
+            config, quant_config=quant_config, prefix=f"{prefix}.self_attn"
+        )
+        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = SiglipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states = self.self_attn(hidden_states)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        return residual + hidden_states
+
+
+class SiglipEncoder(nn.Module):
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([
+            SiglipEncoderLayer(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.layers.{i}",
+            )
+            for i in range(config.num_hidden_layers)
+        ])
+
+    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        hidden_states = inputs_embeds
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
+class SiglipVisionTransformer(nn.Module):
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.embeddings = SiglipVisionEmbeddings(config)
+        self.encoder = SiglipEncoder(
+            config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+        )
+        self.post_layernorm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.embeddings(pixel_values)
+        hidden_states = self.encoder(hidden_states)
+        return self.post_layernorm(hidden_states)
+
+
+class SiglipVisionModel(nn.Module):
+    def __init__(
+        self,
+        config: "SiglipVisionConfig",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.vision_model = SiglipVisionTransformer(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.vision_model",
+        )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        return self.vision_model(pixel_values)
+
+
+# ── Gemma 3 Multi-Modal Projector ─────────────────────────────────────────
+
+class Gemma3MultiModalProjector(nn.Module):
+    """Projects SigLIP features into language model embedding space.
+
+    Applies average pooling to reduce spatial resolution, GemmaRMSNorm,
+    then a learned linear projection (stored as a transposed weight matrix
+    to match HF checkpoint layout: [vision_hidden, text_hidden]).
+    """
+
+    def __init__(self, config: "Gemma3Config") -> None:
+        super().__init__()
+        vision_hidden = config.vision_config.hidden_size
+        text_hidden = config.text_config.hidden_size
+
+        self.mm_input_projection_weight = nn.Parameter(
+            torch.zeros(vision_hidden, text_hidden)
+        )
+        self.mm_soft_emb_norm = GemmaRMSNorm(
+            vision_hidden, eps=config.vision_config.layer_norm_eps
+        )
+        patches_per_image = int(
+            config.vision_config.image_size // config.vision_config.patch_size
+        )
+        tokens_per_side = int(config.mm_tokens_per_image ** 0.5)
+        kernel_size = patches_per_image // tokens_per_side
+        self.avg_pool = nn.AvgPool2d(kernel_size=kernel_size, stride=kernel_size)
+        self._patches_per_image = patches_per_image
+
+    def forward(self, vision_outputs: torch.Tensor) -> torch.Tensor:
+        bsz, _, hidden_size = vision_outputs.shape
+        # Reshape to spatial grid for average pooling.
+        x = vision_outputs.transpose(1, 2)  # [bsz, hidden, patches]
+        x = x.reshape(bsz, hidden_size, self._patches_per_image, self._patches_per_image)
+        x = self.avg_pool(x)                # [bsz, hidden, tokens_per_side, tokens_per_side]
+        x = x.flatten(2).transpose(1, 2)   # [bsz, mm_tokens, hidden]
+        x = self.mm_soft_emb_norm(x)
+        x = torch.matmul(x, self.mm_input_projection_weight)
+        return x.type_as(vision_outputs)
+
+
+# ── Gemma 3 Multimodal (VLM) ──────────────────────────────────────────────
+
+# HF checkpoint key prefixes that need remapping to ATOM model attribute paths.
+_HF_VLM_PREFIX_REMAP: tuple[tuple[str, str], ...] = (
+    ("model.language_model.", "language_model."),
+    ("model.vision_tower.", "vision_tower."),
+    ("model.multi_modal_projector.", "multi_modal_projector."),
+    ("lm_head.", "language_model.lm_head."),
+)
+
+
+class Gemma3ForConditionalGeneration(nn.Module):
+    """Gemma 3 vision-language model (Gemma3ForConditionalGeneration).
+
+    Architecture: SigLIP vision tower + multi-modal projector +
+    Gemma3ForCausalLM language model.
+
+    Compatible with HuggingFace Gemma3ForConditionalGeneration checkpoints.
+    Weight names from the HF checkpoint (model.language_model.*, lm_head.*)
+    are remapped to ATOM's module layout via get_parameter().
+    """
+
+    packed_modules_mapping = {
+        # Text decoder: q/k/v → qkv_proj (also applies to vision encoder)
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        # Text decoder: gate/up → gate_up_proj
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    def __init__(self, atom_config: Config, prefix: str = "") -> None:
+        super().__init__()
+        config: "Gemma3Config" = atom_config.hf_config
+        quant_config = atom_config.quant_config
+
+        self.vision_tower = SiglipVisionModel(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_tower"),
+        )
+        self.multi_modal_projector = Gemma3MultiModalProjector(config)
+
+        # Build the language model using the text sub-config, but swap in the
+        # full Gemma3Config so Gemma3Model's isinstance check passes.
+        text_atom_config = Config.__new__(Config)
+        text_atom_config.__dict__.update(atom_config.__dict__)
+        text_atom_config.hf_config = config.text_config
+        self.language_model = Gemma3ForCausalLM(
+            text_atom_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
+
+        self.image_token_id = getattr(config, "image_token_index", None) or getattr(
+            config, "image_token_id", None
+        )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    # ------------------------------------------------------------------
+    # Weight name remapping: HF checkpoint → ATOM module layout
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _remap_weight_name(name: str) -> str:
+        for hf_prefix, atom_prefix in _HF_VLM_PREFIX_REMAP:
+            if name.startswith(hf_prefix):
+                return atom_prefix + name[len(hf_prefix):]
+        return name
+
+    def get_parameter(self, target: str) -> nn.Parameter:
+        remapped = self._remap_weight_name(target)
+        try:
+            return super().get_parameter(remapped)
+        except AttributeError:
+            # Weight not present in this model (e.g. pooling head, lm_loss).
+            # Return a dummy parameter with a no-op loader so the ATOM weight
+            # loader silently skips it.
+            dummy = nn.Parameter(torch.empty(0), requires_grad=False)
+            dummy.weight_loader = lambda *a, **kw: None  # type: ignore[attr-defined]
+            return dummy
+
+    # ------------------------------------------------------------------
+    # Embedding helpers
+    # ------------------------------------------------------------------
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.language_model.get_input_embeddings(input_ids)
+
+    def _merge_image_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace image-token positions with projected vision features."""
+        image_features = self.vision_tower(pixel_values)        # [n, patches, v_hidden]
+        image_embeds = self.multi_modal_projector(image_features)  # [n, mm_tokens, t_hidden]
+        image_embeds_flat = image_embeds.flatten(0, 1)             # [n*mm_tokens, t_hidden]
+
+        if self.image_token_id is not None:
+            mask = input_ids == self.image_token_id
+        else:
+            # Fallback: fill first N positions (should not happen in practice)
+            mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
+        # Scatter image embeddings into the right positions.
+        mask_expanded = mask.unsqueeze(-1).expand_as(inputs_embeds)
+        n_slots = mask.sum().item()
+        if n_slots == image_embeds_flat.shape[0]:
+            inputs_embeds = inputs_embeds.masked_scatter(
+                mask_expanded, image_embeds_flat
+            )
+        return inputs_embeds
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if intermediate_tensors is None and inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
+            if pixel_values is not None:
+                inputs_embeds = self._merge_image_embeddings(
+                    input_ids, inputs_embeds, pixel_values
+                )
+            input_ids = None  # consumed via inputs_embeds
+
+        return self.language_model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+
+    def compute_logits(
+        self, hidden_states: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        return self.language_model.compute_logits(hidden_states)

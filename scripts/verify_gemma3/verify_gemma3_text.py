@@ -62,11 +62,32 @@ for _d in _aiter_candidates:
         _pp_parts.insert(0, _d)
     if _d and os.path.isdir(_d) and _d not in sys.path:
         sys.path.insert(0, _d)
+
+# Add local Triton when present (needed for ATOM_USE_TRITON_DECODE=1)
+_triton_candidates = [
+    os.environ.get("TRITON_DIR"),
+    os.path.join(os.path.dirname(repo_root), "triton"),
+    "/dockerx/triton",
+]
+_triton_python = None
+for _d in _triton_candidates:
+    if _d and os.path.isdir(os.path.join(_d, "python")):
+        _triton_python = os.path.join(_d, "python")
+        break
+if _triton_python and _triton_python not in _pp_parts:
+    _pp_parts.insert(0, _triton_python)
+if _triton_python and _triton_python not in sys.path:
+    sys.path.insert(0, _triton_python)
+
 if _pp_parts:
     os.environ["PYTHONPATH"] = os.pathsep.join(_pp_parts)
 
-# Use ASM decode by default so script runs without ROCm Triton (gluon.language.amd)
-os.environ.setdefault("ATOM_USE_TRITON_DECODE", "0")
+# Enable Triton decode when Triton is available (required for correct Gemma3 sliding window output).
+# Fall back to ASM (ATOM_USE_TRITON_DECODE=0) only if Triton is not found.
+if _triton_python is not None:
+    os.environ.setdefault("ATOM_USE_TRITON_DECODE", "1")
+else:
+    os.environ.setdefault("ATOM_USE_TRITON_DECODE", "0")
 # Reduce log noise so verification output is readable
 os.environ.setdefault("AITER_LOG_LEVEL", "ERROR")
 

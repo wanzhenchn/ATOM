@@ -66,6 +66,7 @@ support_model_arch_dict = {
     "Glm4MoeForCausalLM": "atom.models.glm4_moe.Glm4MoeForCausalLM",
     "Qwen3NextForCausalLM": "atom.models.qwen3_next.Qwen3NextForCausalLM",
     "Gemma3ForCausalLM": "atom.models.gemma3.Gemma3ForCausalLM",
+    "Gemma3ForConditionalGeneration": "atom.models.gemma3.Gemma3ForConditionalGeneration",
 }
 # seed = 34567
 # np.random.seed(seed)
@@ -864,7 +865,10 @@ class ModelRunner:
 
     def allocate_forward_vars(self):
         config = self.config
-        hidden_size = config.hf_config.hidden_size
+        _hf_cfg = config.hf_config
+        hidden_size = getattr(_hf_cfg, "hidden_size", None) or getattr(
+            getattr(_hf_cfg, "text_config", None), "hidden_size", None
+        )
         hidden_type = config.torch_dtype
         self.max_bs = self.config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
