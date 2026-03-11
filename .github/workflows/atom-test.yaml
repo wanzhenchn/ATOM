@@ -271,9 +271,9 @@ jobs:
         run: |
           docker exec "$CONTAINER_NAME" bash -lc "
             set -euo pipefail
-            pip install -U 'lm-eval[api]'
-            pip install hf_transfer
-            pip install --upgrade 'pybind11>=3.0.1'
+            pip install --timeout 60 --retries 10 -U 'lm-eval[api]'
+            pip install --timeout 60 --retries 10 hf_transfer
+            pip install --timeout 60 --retries 10 --upgrade 'pybind11>=3.0.1'
 
             echo '=== Installing ATOM ==='
             cd /workspace
