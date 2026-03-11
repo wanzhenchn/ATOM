@@ -147,6 +147,7 @@ def load_model(
 
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     weights_mapping = getattr(model, "weights_mapping", {})
+    skip_weight_prefixes = getattr(model, "skip_weight_prefixes", [])
     params_dict = dict(model.named_parameters())
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -158,6 +159,13 @@ def load_model(
             if load_dummy:
                 continue
             if name.endswith("kv_scale") or "inv_freq" in name:
+                continue
+            # Skip weights matching model-defined prefixes (e.g. vision encoder
+            # weights in multimodal checkpoints that are not needed for text-only
+            # inference).
+            if skip_weight_prefixes and any(
+                name.startswith(p) for p in skip_weight_prefixes
+            ):
                 continue
             if spec_decode:
                 if hf_config.model_type == "deepseek_mtp":
