@@ -156,14 +156,13 @@ jobs:
 
       - name: Download latest aiter wheel from CI artifacts
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "=== Finding latest aiter-whl-main artifact from ROCm/aiter ==="
 
-          ARTIFACT_JSON=$(gh api "repos/ROCm/aiter/actions/artifacts?per_page=100" \
-            --jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | sort_by(.created_at) | last')
+          ARTIFACT_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/ROCm/aiter/actions/artifacts?per_page=100" \
+            | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | sort_by(.created_at) | last')
 
           ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
           ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
@@ -176,7 +175,9 @@ jobs:
           echo "Artifact: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
           echo "=== Downloading artifact ==="
           mkdir -p /tmp/aiter-whl
-          gh api "repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/aiter-whl.zip
+          curl -s -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o /tmp/aiter-whl.zip
           unzip -o /tmp/aiter-whl.zip -d /tmp/aiter-whl
           rm -f /tmp/aiter-whl.zip
 
