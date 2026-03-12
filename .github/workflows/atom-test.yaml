@@ -20,6 +20,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+  actions: read
+
 env:
   ATOM_BASE_IMAGE: rocm/pytorch:latest
   GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/ROCm/ATOM.git' }}
@@ -160,23 +164,39 @@ jobs:
           set -euo pipefail
           echo "=== Finding latest aiter-whl-main artifact from ROCm/aiter ==="
 
-          ARTIFACT_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/ROCm/aiter/actions/artifacts?per_page=100" \
-            | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | sort_by(.created_at) | last')
+          API_URL="https://api.github.com"
+          AUTH_HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
+          AITER_TEST_WORKFLOW_ID=179476100
 
-          ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
-          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
+          # Search recent Aiter Test workflow runs for one that has an aiter-whl artifact
+          RUNS=$(curl -s -H "$AUTH_HEADER" \
+            "$API_URL/repos/ROCm/aiter/actions/workflows/$AITER_TEST_WORKFLOW_ID/runs?per_page=20&status=completed")
+
+          ARTIFACT_ID=""
+          ARTIFACT_NAME=""
+          for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
+            echo "Checking run $RUN_ID for aiter-whl artifact..."
+            ARTIFACT_JSON=$(curl -s -H "$AUTH_HEADER" \
+              "$API_URL/repos/ROCm/aiter/actions/runs/$RUN_ID/artifacts" \
+              | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | first')
+
+            if [ "$ARTIFACT_JSON" != "null" ] && [ -n "$ARTIFACT_JSON" ]; then
+              ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
+              ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
+              echo "Found artifact in run $RUN_ID: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
+              break
+            fi
+          done
 
           if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
-            echo "ERROR: No aiter-whl-main artifact found"
+            echo "ERROR: No aiter-whl-main artifact found in recent Aiter Test runs"
             exit 1
           fi
 
-          echo "Artifact: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
           echo "=== Downloading artifact ==="
           mkdir -p /tmp/aiter-whl
-          curl -s -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
+          curl -s -L -H "$AUTH_HEADER" \
+            "$API_URL/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
             -o /tmp/aiter-whl.zip
           unzip -o /tmp/aiter-whl.zip -d /tmp/aiter-whl
           rm -f /tmp/aiter-whl.zip
