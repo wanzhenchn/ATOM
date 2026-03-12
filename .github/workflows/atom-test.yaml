@@ -168,14 +168,13 @@ jobs:
           AUTH_HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
           AITER_TEST_WORKFLOW_ID=179476100
 
-          # Search recent Aiter Test workflow runs for one that has an aiter-whl artifact
+          # Search Aiter Test workflow runs on main branch for one that has an aiter-whl artifact
           RUNS=$(curl -s -H "$AUTH_HEADER" \
-            "$API_URL/repos/ROCm/aiter/actions/workflows/$AITER_TEST_WORKFLOW_ID/runs?per_page=20&status=completed")
+            "$API_URL/repos/ROCm/aiter/actions/workflows/$AITER_TEST_WORKFLOW_ID/runs?per_page=100&branch=main&event=push")
 
           ARTIFACT_ID=""
           ARTIFACT_NAME=""
           for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
-            echo "Checking run $RUN_ID for aiter-whl artifact..."
             ARTIFACT_JSON=$(curl -s -H "$AUTH_HEADER" \
               "$API_URL/repos/ROCm/aiter/actions/runs/$RUN_ID/artifacts" \
               | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | first')
