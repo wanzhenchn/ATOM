@@ -134,61 +134,6 @@ def load_model(
     prefix: str = "",
     is_plugin_mode: bool = False,
 ):
-    def _log_param_resolution_debug(
-        requested_name: str,
-        original_weight_name: str,
-    ) -> None:
-        """Log detailed diagnostics when a tensor cannot be resolved as nn.Parameter."""
-        if "weight_scale" not in requested_name and "weight_scale" not in original_weight_name:
-            return
-
-        named_params = dict(model.named_parameters())
-        named_buffers = dict(model.named_buffers())
-        state_keys = set(model.state_dict().keys())
-        root, _, leaf = requested_name.rpartition(".")
-
-        target_module = model
-        module_found = True
-        if root:
-            for seg in root.split("."):
-                if not hasattr(target_module, seg):
-                    module_found = False
-                    target_module = None
-                    break
-                target_module = getattr(target_module, seg)
-
-        attr_exists = module_found and hasattr(target_module, leaf)
-        attr_value = getattr(target_module, leaf) if attr_exists else None
-        attr_type = type(attr_value).__name__ if attr_exists else "N/A"
-
-        logger.error(
-            "Weight-scale resolution failure debug: "
-            "original_weight_name=%s, requested_name=%s, in_named_parameters=%s, "
-            "in_named_buffers=%s, in_state_dict=%s, module_found=%s, attr_exists=%s, attr_type=%s",
-            original_weight_name,
-            requested_name,
-            requested_name in named_params,
-            requested_name in named_buffers,
-            requested_name in state_keys,
-            module_found,
-            attr_exists,
-            attr_type,
-        )
-
-        if module_found:
-            preview_keys = []
-            for key in state_keys:
-                if root and key.startswith(root + "."):
-                    preview_keys.append(key)
-                if len(preview_keys) >= 10:
-                    break
-            if preview_keys:
-                logger.error(
-                    "Nearby state_dict keys for %s (up to 10): %s",
-                    root if root else "<root>",
-                    preview_keys,
-                )
-
     def have_shared_expert(name):
         maybe_matching_list = ["mlp.shared_experts.", "mlp.shared_expert."]
         for maybe_matching_name in maybe_matching_list:
@@ -259,14 +204,7 @@ def load_model(
                     param_name = name.replace(k, v)
                     # FIXME output_scale has a value, so accuracy is incorrect. this should be loaded and used in llfp4.
                     if "output_scale" not in param_name:
-                        try:
-                            param = model.get_parameter(param_name)
-                        except AttributeError:
-                            _log_param_resolution_debug(
-                                requested_name=param_name,
-                                original_weight_name=name,
-                            )
-                            raise
+                        param = model.get_parameter(param_name)
                         weight_loader = getattr(param, "weight_loader")
                         # weight_loader(param, weight_tensor, shard_id)
                         futures.append(
@@ -290,14 +228,7 @@ def load_model(
                             continue
                         if "mtp" in name and not spec_decode:
                             continue
-                        try:
-                            param = model.get_parameter(name)
-                        except AttributeError:
-                            _log_param_resolution_debug(
-                                requested_name=name,
-                                original_weight_name=name,
-                            )
-                            raise
+                        param = model.get_parameter(name)
                         weight_loader = getattr(param, "weight_loader")
                         futures.append(
                             executor.submit(
@@ -321,14 +252,7 @@ def load_model(
                     else:
                         if "mtp" in name and not spec_decode:
                             continue
-                        try:
-                            param = model.get_parameter(name)
-                        except AttributeError:
-                            _log_param_resolution_debug(
-                                requested_name=name,
-                                original_weight_name=name,
-                            )
-                            raise
+                        param = model.get_parameter(name)
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
@@ -339,14 +263,7 @@ def load_model(
                         # weight_loader(param, weight_tensor)
                 else:
                     # Model doesn't have expert mapping, use generic loading
-                    try:
-                        param = model.get_parameter(name)
-                    except AttributeError:
-                        _log_param_resolution_debug(
-                            requested_name=name,
-                            original_weight_name=name,
-                        )
-                        raise
+                    param = model.get_parameter(name)
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
