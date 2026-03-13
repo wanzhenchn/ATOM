@@ -32,8 +32,70 @@ jobs:
       black: true
       ruff: true
 
-  atom:
+  download_aiter_wheel:
+    if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
     needs: [pre-checks]
+    name: Download aiter wheel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and download latest aiter wheel
+        run: |
+          set -euo pipefail
+          echo "=== Finding latest aiter-whl-main artifact from ROCm/aiter ==="
+
+          API_URL="https://api.github.com"
+          AUTH_HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
+          AITER_TEST_WORKFLOW_ID=179476100
+
+          RUNS=$(curl -s -H "$AUTH_HEADER" \
+            "$API_URL/repos/ROCm/aiter/actions/workflows/$AITER_TEST_WORKFLOW_ID/runs?per_page=100&branch=main&event=push")
+
+          ARTIFACT_ID=""
+          ARTIFACT_NAME=""
+          for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
+            ARTIFACT_JSON=$(curl -s -H "$AUTH_HEADER" \
+              "$API_URL/repos/ROCm/aiter/actions/runs/$RUN_ID/artifacts" \
+              | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | first')
+
+            if [ "$ARTIFACT_JSON" != "null" ] && [ -n "$ARTIFACT_JSON" ]; then
+              ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
+              ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
+              echo "Found artifact in run $RUN_ID: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
+              break
+            fi
+          done
+
+          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
+            echo "ERROR: No aiter-whl-main artifact found in recent Aiter Test runs"
+            exit 1
+          fi
+
+          echo "=== Downloading artifact ==="
+          mkdir -p aiter-whl
+          curl -s -L -H "$AUTH_HEADER" \
+            "$API_URL/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o aiter-whl.zip
+          unzip -o aiter-whl.zip -d aiter-whl
+          rm -f aiter-whl.zip
+
+          AITER_WHL=$(ls -t aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
+          if [ -z "$AITER_WHL" ]; then
+            echo "ERROR: No amd_aiter wheel found in artifact"
+            ls -la aiter-whl/
+            exit 1
+          fi
+
+          echo "Downloaded wheel: $AITER_WHL"
+
+      - name: Upload aiter wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiter-whl
+          path: aiter-whl/amd_aiter*.whl
+          retention-days: 1
+
+  atom:
+    needs: [pre-checks, download_aiter_wheel]
     name: ATOM Test
     strategy:
       fail-fast: false
@@ -158,58 +220,12 @@ jobs:
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         uses: actions/checkout@v4
 
-      - name: Download latest aiter wheel from CI artifacts
+      - name: Download aiter wheel
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
-        run: |
-          set -euo pipefail
-          echo "=== Finding latest aiter-whl-main artifact from ROCm/aiter ==="
-
-          API_URL="https://api.github.com"
-          AUTH_HEADER="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
-          AITER_TEST_WORKFLOW_ID=179476100
-
-          # Search Aiter Test workflow runs on main branch for one that has an aiter-whl artifact
-          RUNS=$(curl -s -H "$AUTH_HEADER" \
-            "$API_URL/repos/ROCm/aiter/actions/workflows/$AITER_TEST_WORKFLOW_ID/runs?per_page=100&branch=main&event=push")
-
-          ARTIFACT_ID=""
-          ARTIFACT_NAME=""
-          for RUN_ID in $(echo "$RUNS" | jq -r '.workflow_runs[].id'); do
-            ARTIFACT_JSON=$(curl -s -H "$AUTH_HEADER" \
-              "$API_URL/repos/ROCm/aiter/actions/runs/$RUN_ID/artifacts" \
-              | jq '[.artifacts[] | select(.name | startswith("aiter-whl-main")) | select(.expired == false)] | first')
-
-            if [ "$ARTIFACT_JSON" != "null" ] && [ -n "$ARTIFACT_JSON" ]; then
-              ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
-              ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
-              echo "Found artifact in run $RUN_ID: $ARTIFACT_NAME (ID: $ARTIFACT_ID)"
-              break
-            fi
-          done
-
-          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
-            echo "ERROR: No aiter-whl-main artifact found in recent Aiter Test runs"
-            exit 1
-          fi
-
-          echo "=== Downloading artifact ==="
-          rm -rf /tmp/aiter-whl
-          mkdir -p /tmp/aiter-whl
-          curl -s -L -H "$AUTH_HEADER" \
-            "$API_URL/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
-            -o /tmp/aiter-whl.zip
-          unzip -o /tmp/aiter-whl.zip -d /tmp/aiter-whl
-          rm -f /tmp/aiter-whl.zip
-
-          AITER_WHL=$(ls -t /tmp/aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
-          if [ -z "$AITER_WHL" ]; then
-            echo "ERROR: No amd_aiter wheel found in artifact"
-            ls -la /tmp/aiter-whl/
-            exit 1
-          fi
-
-          echo "Downloaded wheel: $AITER_WHL"
-          echo "AITER_WHL_PATH=$AITER_WHL" >> $GITHUB_ENV
+        uses: actions/download-artifact@v4
+        with:
+          name: aiter-whl
+          path: /tmp/aiter-whl
 
       - name: Start CI container
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
@@ -270,9 +286,16 @@ jobs:
       - name: Install aiter from wheel
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
         run: |
+          AITER_WHL=$(ls -t /tmp/aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
+          if [ -z "$AITER_WHL" ]; then
+            echo "ERROR: No amd_aiter wheel found"
+            ls -la /tmp/aiter-whl/
+            exit 1
+          fi
+
           echo "=== Copying wheel into container ==="
-          WHL_NAME=$(basename "${{ env.AITER_WHL_PATH }}")
-          docker cp "${{ env.AITER_WHL_PATH }}" "$CONTAINER_NAME:/tmp/$WHL_NAME"
+          WHL_NAME=$(basename "$AITER_WHL")
+          docker cp "$AITER_WHL" "$CONTAINER_NAME:/tmp/$WHL_NAME"
 
           docker exec "$CONTAINER_NAME" bash -lc "
             set -euo pipefail
