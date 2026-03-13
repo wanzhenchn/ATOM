@@ -193,6 +193,7 @@ jobs:
           fi
 
           echo "=== Downloading artifact ==="
+          rm -rf /tmp/aiter-whl
           mkdir -p /tmp/aiter-whl
           curl -s -L -H "$AUTH_HEADER" \
             "$API_URL/repos/ROCm/aiter/actions/artifacts/$ARTIFACT_ID/zip" \
@@ -200,7 +201,7 @@ jobs:
           unzip -o /tmp/aiter-whl.zip -d /tmp/aiter-whl
           rm -f /tmp/aiter-whl.zip
 
-          AITER_WHL=$(ls /tmp/aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
+          AITER_WHL=$(ls -t /tmp/aiter-whl/amd_aiter*.whl 2>/dev/null | head -1)
           if [ -z "$AITER_WHL" ]; then
             echo "ERROR: No amd_aiter wheel found in artifact"
             ls -la /tmp/aiter-whl/
