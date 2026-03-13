@@ -307,7 +307,7 @@ def rocm_aiter_grouped_topk_impl(
         num_expert_group,
         topk_group,
         need_renorm,
-        scoring_func,
+        scoring_func == "softmax",
         routed_scaling_factor,
     )
     if is_rocm_aiter_fusion_shared_expert_enabled() and num_fused_shared_experts > 0:
@@ -423,8 +423,14 @@ def rocm_aiter_grouped_topk(
         )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
+        token = gating_output.shape[0]
+        device = gating_output.device
+        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
         return torch.ops.aiter.rocm_aiter_grouped_topk_impl(
             gating_output,
+            topk_weights,
+            topk_ids,
             num_expert_group,
             topk_group,
             renormalize,

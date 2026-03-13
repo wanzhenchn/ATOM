@@ -535,6 +535,16 @@ class QuantizationConfig:
                     "gate_proj": ("gate_up_proj", 0),
                     "up_proj": ("gate_up_proj", 1),
                 }
+        elif model_type == "deepseek_vl_v2":
+            self.packed_modules_mapping = {
+                "gate_proj": ("gate_up_proj", 0),
+                "up_proj": ("gate_up_proj", 1),
+            }
+        elif model_type == "deepseek_vl_v2":
+            self.packed_modules_mapping = {
+                "gate_proj": ("gate_up_proj", 0),
+                "up_proj": ("gate_up_proj", 1),
+            }
         elif model_type == "qwen3_moe" or model_type == "qwen3_next":
             if getattr(hf_config, "mlp_only_layers", []):
                 self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
@@ -574,9 +584,10 @@ _CONFIG_REGISTRY: dict[str, str] = {
 }
 
 
-def get_hf_config(model: str) -> PretrainedConfig:
+def get_hf_config(model: str, trust_remote_code: bool = False) -> PretrainedConfig:
     config_dict, _ = PretrainedConfig.get_config_dict(
         model,
+        trust_remote_code=trust_remote_code,
     )
     model_type = config_dict.get("model_type")
 
@@ -593,8 +604,9 @@ def get_hf_config(model: str) -> PretrainedConfig:
             # revision=revision,
             # code_revision=code_revision,
             token=_get_hf_token(),
+            trust_remote_code=trust_remote_code,
         )
-    return AutoConfig.from_pretrained(model)
+    return AutoConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
 
 
 def get_generation_config(model: str) -> GenerationConfig:
@@ -817,7 +829,7 @@ class Config:
         # assert os.path.isdir(self.model)
 
         assert 1 <= self.tensor_parallel_size <= 8
-        self.hf_config = get_hf_config(self.model)
+        self.hf_config = get_hf_config(self.model, self.trust_remote_code)
         if not hasattr(self.hf_config, "rope_parameters"):
             # Compatible with both transformers < 5
             rope_params = getattr(self.hf_config, "rope_scaling", {})

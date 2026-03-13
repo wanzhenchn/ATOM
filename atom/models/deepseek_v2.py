@@ -118,6 +118,13 @@ ENABLE_ALLREDUCE_RMSNORM_FUSION = envs.ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION
 ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION = envs.ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION
 
 
+def _ar_rmsnorm_supported(hidden_size: int) -> bool:
+    """Check if hidden_size is compatible with the fused allreduce-rmsnorm
+    kernel which requires n_bytes (hidden_size * sizeof(bf16)) % 1024 == 0."""
+    n_bytes = hidden_size * 2  # bf16
+    return n_bytes % 1024 == 0 and 1024 <= n_bytes <= 32768
+
+
 def _fuse_rmsnorm_fp4_quant_fake(
     x1: torch.Tensor,
     x1_weight: torch.Tensor,
@@ -784,7 +791,7 @@ class DeepseekV2MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
+            scoring_func=getattr(config, "scoring_func", "softmax"),
             e_score_correction_bias=self.gate.e_score_correction_bias,
             config=config,
         )
@@ -1525,6 +1532,114 @@ class DeepseekV2MLAAttention(nn.Module):
         )
 
 
+
+class DeepseekV2Attention(nn.Module):
+    """Standard multi-head attention for DeepSeek models with use_mla=False.
+
+    Uses separate ColumnParallelLinear for Q/K/V projections so that:
+    - Module prefixes match the quantization exclude list (no QKV fusion)
+    - KV cache allocation matches the TP-split number of KV heads
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position_embeddings: int = 8192,
+        cache_config: str = "bf16",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        layer_num: int = 0,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = num_kv_heads
+        assert num_heads % tp_size == 0
+        self.num_heads = num_heads // tp_size
+        if num_kv_heads >= tp_size:
+            assert num_kv_heads % tp_size == 0
+            self.num_kv_heads = num_kv_heads // tp_size
+        else:
+            self.num_kv_heads = num_kv_heads
+        self.head_dim = getattr(config, "head_dim", None) or (
+            hidden_size // num_heads
+        )
+        self.scaling = self.head_dim**-0.5
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.q_proj = ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=num_heads * self.head_dim,
+            bias=getattr(config, "attention_bias", False),
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+        self.k_proj = ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
+            bias=getattr(config, "attention_bias", False),
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj",
+        )
+        self.v_proj = ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=num_kv_heads * self.head_dim,
+            bias=getattr(config, "attention_bias", False),
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj",
+        )
+        enable_ar_fusion = ENABLE_ALLREDUCE_RMSNORM_FUSION and _ar_rmsnorm_supported(hidden_size)
+        self.o_proj = RowParallelLinear(
+            input_size=num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=not enable_ar_fusion,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        rope_params = config.rope_parameters
+        rope_theta = rope_params.get("rope_theta") or 10000
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            base=rope_theta,
+            is_neox_style=False,
+        )
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache_dtype=cache_config,
+            layer_num=layer_num,
+            prefix=f"{prefix}.attn",
+            rotary_emb=self.rotary_emb,
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        x_scale = None
+        if isinstance(hidden_states, tuple):
+            hidden_states, x_scale = hidden_states
+        q = self.q_proj(hidden_states, x_scale=x_scale)
+        k = self.k_proj(hidden_states, x_scale=x_scale)
+        v = self.v_proj(hidden_states, x_scale=x_scale)
+        attn_output = self.attn(q, k, v, positions)
+        output = self.o_proj(attn_output)
+        return output
+
+
 class DeepseekV2DecoderLayer(nn.Module):
 
     def __init__(
@@ -1545,22 +1660,36 @@ class DeepseekV2DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
 
-        self.self_attn = DeepseekV2MLAAttention(
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
-            kv_lora_rank=config.kv_lora_rank,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-            layer_num=layer_num,
-            topk_indices_buffer=topk_indices_buffer,
-        )
+        use_mla = getattr(config, "use_mla", True) and getattr(config, "kv_lora_rank", None) is not None
+        if use_mla:
+            self.self_attn = DeepseekV2MLAAttention(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+                kv_lora_rank=config.kv_lora_rank,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                layer_num=layer_num,
+                topk_indices_buffer=topk_indices_buffer,
+            )
+        else:
+            self.self_attn = DeepseekV2Attention(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                layer_num=layer_num,
+            )
 
         # When ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION is turned on self.fuse_input_norm_quant is turned on only if use_triton_gemm and (FP8 or FP4),
         # Because AR_RMS and RMS_Quant cannot co-exist for input_layernorm, this block of codes ensures 3 things when ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION is turned on:
@@ -1573,7 +1702,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             else quant_config.global_quant_config["quant_dtype"]
         )
         self.fuse_input_norm_quant = False
-        self.fuse_ar_input_norm = ENABLE_ALLREDUCE_RMSNORM_FUSION
+        enable_ar_fusion = ENABLE_ALLREDUCE_RMSNORM_FUSION and _ar_rmsnorm_supported(config.hidden_size)
+        self.fuse_ar_input_norm = enable_ar_fusion
         if quant_config is not None and ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION:
             if (
                 self.quant_dtype == dtypes.fp8 or self.quant_dtype == dtypes.fp4x2
@@ -1594,7 +1724,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
-            and layer_idx % config.moe_layer_freq == 0
+            and layer_idx % (getattr(config, "moe_layer_freq", 1) or 1) == 0
         ):
             self.mlp = DeepseekV2MoE(
                 config=config,
@@ -1618,10 +1748,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             and self.layer_idx > 0
             and not is_mtp_block,
         )
+        attn_replicated = False
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
-            fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION,
+            fused_allreduce=enable_ar_fusion and not attn_replicated,
         )
         self.routed_scaling_factor = config.routed_scaling_factor
         self.fuse_rmsnorm_quant = (
@@ -1829,6 +1960,14 @@ class DeepseekV2Model(nn.Module):
 
 class DeepseekV2ForCausalLM(nn.Module):
 
+    skip_weight_prefixes = [
+        "model.image_newline",
+        "model.projector.",
+        "model.sam_model.",
+        "model.view_seperator",
+        "model.vision_model.",
+    ]
+
     def __init__(
         self,
         atom_config: Config,
@@ -1841,10 +1980,16 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
-        if hasattr(config, "q_lora_rank") and config.q_lora_rank is not None:
+        use_mla = getattr(config, "use_mla", True) and getattr(config, "kv_lora_rank", None) is not None
+        if use_mla and hasattr(config, "q_lora_rank") and config.q_lora_rank is not None:
             self.packed_modules_mapping = {
                 "q_a_proj": ("fused_qkv_a_proj", 0),
                 "kv_a_proj_with_mqa": ("fused_qkv_a_proj", 1),
+                "gate_proj": ("gate_up_proj", 0),
+                "up_proj": ("gate_up_proj", 1),
+            }
+        elif not use_mla:
+            self.packed_modules_mapping = {
                 "gate_proj": ("gate_up_proj", 0),
                 "up_proj": ("gate_up_proj", 1),
             }
