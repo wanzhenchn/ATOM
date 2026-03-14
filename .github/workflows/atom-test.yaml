@@ -218,7 +218,7 @@ jobs:
 
       - name: Checkout ATOM repo
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download aiter wheel
         if: matrix.run_on_pr == true || github.event_name != 'pull_request'
@@ -444,7 +444,7 @@ jobs:
 
       - name: Upload output
         if: (matrix.run_on_pr == true || github.event_name != 'pull_request') && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.model_name }}_atom_test_output.txt
           path: atom_test_output.txt
