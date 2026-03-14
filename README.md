@@ -37,15 +37,35 @@
 
 ## 🛠️ Installation
 
-### 1. Pull Docker Image
+### Option A: Nightly Image (Recommended)
+
+Pre-built image with AITER + ATOM ready to use:
+
+```bash
+docker pull rocm/atom-dev:latest
+
+docker run -it --network=host \
+  --device=/dev/kfd \
+  --device=/dev/dri \
+  --group-add video \
+  --cap-add=SYS_PTRACE \
+  --security-opt seccomp=unconfined \
+  -v $HOME:/home/$USER \
+  -v /mnt:/mnt \
+  -v /data:/data \
+  --shm-size=16G \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  rocm/atom-dev:latest
+```
+
+### Option B: Build from Base ROCm Image
+
+#### 1. Pull and run the base image
 
 ```bash
 docker pull rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0
-```
 
-### 2. Run Docker Container
-
-```bash
 docker run -it --network=host \
   --device=/dev/kfd \
   --device=/dev/dri \
@@ -61,11 +81,11 @@ docker run -it --network=host \
   rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0
 ```
 
-### 3. Clone and Setup
+#### 2. Install AITER and ATOM inside the container
 
 ```bash
 pip install amd-aiter
-git clone https://github.com/ROCm/ATOM.git; pip install ./ATOM
+git clone https://github.com/ROCm/ATOM.git && pip install ./ATOM
 ```
 
 ## 📚 Documentation
@@ -159,6 +179,48 @@ python -m atom.benchmarks.benchmark_serving \
   --save-result --percentile-metrics="ttft,tpot,itl,e2el" \
   --result-dir=./ --result-filename=$RESULT_FILENAME.json
 ```
+
+### Profile Analyze
+
+ATOM supports automatic trace collection and analysis, which breaks down GPU kernel durations per module for both **prefill** and **decode** phases and exports the results to Excel (`.xlsx`) files.
+
+#### Step 1: Collect a Trace
+
+Launch the server with `--torch-profiler-dir` to enable the PyTorch profiler and `--mark-trace` to insert per-module annotations into the trace. Set `TORCHINDUCTOR_COMPILE_THREADS=1` to ensure deterministic compilation order.
+
+```bash
+TORCHINDUCTOR_COMPILE_THREADS=1 python -m atom.entrypoints.openai_server \
+  --model deepseek-ai/DeepSeek-R1 \
+  --kv_cache_dtype fp8 -tp 8 \
+  --torch-profiler-dir ./trace \
+  --mark-trace
+```
+
+After the server processes requests and shuts down, two `*.json.gz` trace files will be generated in the `--torch-profiler-dir` directory.
+
+#### Step 2: Analyze the Trace
+
+Run `parse_trace.py` on the collected trace file(use it on trace file start with the model name):
+
+```bash
+python ATOM/tools/parse_trace.py ./trace/model_name_ts_*.json.gz
+```
+
+This produces two Excel files in the current directory:
+
+| Output File | Description |
+|---|---|
+| `prefill_breakdown.xlsx` | Per-kernel duration breakdown for one prefill layer |
+| `decode_breakdown.xlsx` | Per-kernel duration breakdown for one decode layer |
+
+Each file contains columns: `cpu_module`, `gpu_kernel`, `duration_us`, `sum per module`, plus averaged values across layers.
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--layer N` | `3` | Target transformer layer index to analyze (0-indexed) |
+
 
 ## 📊 Performance
 
