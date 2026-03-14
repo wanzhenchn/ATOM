@@ -100,14 +100,13 @@ fi
 
 if [ "$TYPE" == "benchmark" ]; then
   echo ""
-  echo "========== Cloning bench_serving =========="
-  git clone https://github.com/kimbochen/bench_serving.git && chmod +x bench_serving/benchmark_serving.py
   echo "========== Running benchmark test =========="
+  PROFILE_ARG=""
   if [ "${ENABLE_TORCH_PROFILER:-0}" == "1" ]; then
-    echo "Starting torch profiler..."
-    curl -s -S -X POST http://127.0.0.1:8000/start_profile || echo "Warning: failed to start profiler"
+    PROFILE_ARG="--profile"
+    echo "Profiling enabled via --profile flag"
   fi
-  python bench_serving/benchmark_serving.py \
+  python -m atom.benchmarks.benchmark_serving \
     --model=$MODEL_PATH --backend=vllm --base-url="http://localhost:8000" \
     --dataset-name=random \
     --random-input-len=$ISL --random-output-len=$OSL --random-range-ratio=$RANDOM_RANGE_RATIO \
@@ -117,29 +116,8 @@ if [ "$TYPE" == "benchmark" ]; then
     --num-warmups=1 \
     --request-rate=inf --ignore-eos \
     --save-result --percentile-metrics="ttft,tpot,itl,e2el" \
-    --result-dir=. --result-filename=${RESULT_FILENAME}.json
-
-  if [ "${ENABLE_TORCH_PROFILER:-0}" == "1" ]; then
-    echo "Stopping torch profiler..."
-    curl -s -S -X POST http://127.0.0.1:8000/stop_profile || echo "Warning: failed to stop profiler"
-    ATOM_SERVER_LOG="/tmp/atom_server.log"
-    echo "Waiting for 'Profiler stopped.' in server log ..."
-    profiler_done=false
-    for i in $(seq 1 300); do
-      if grep -q "Profiler stopped." "$ATOM_SERVER_LOG" 2>/dev/null; then
-        echo "Profiler stopped after ${i}s"
-        ls -lhR /app/trace/
-        profiler_done=true
-        break
-      fi
-      echo "Waiting for profiler to finish... ($i/300)"
-      sleep 1
-    done
-    if [ "$profiler_done" = false ]; then
-      echo "Warning: 'Profiler stopped.' not found in server log after 300s"
-      ls -lhR /app/trace/ 2>/dev/null || true
-    fi
-  fi
+    --result-dir=. --result-filename=${RESULT_FILENAME}.json \
+    $PROFILE_ARG
 
   # Inject ISL/OSL into result JSON for summary table
   if [ -f "${RESULT_FILENAME}.json" ]; then

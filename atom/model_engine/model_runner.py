@@ -1525,20 +1525,39 @@ class ModelRunner:
             all_greedy,
         )
 
-    def run_model(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def run_model(
+        self,
+        input_ids: torch.Tensor,
+        batch: Optional[ScheduledBatch] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         forward_context = get_forward_context()
         context = forward_context.context
         bs = context.batch_size
         is_prefill = context.is_prefill
         positions = context.positions
         if is_prefill or self.enforce_eager or bs > self.graph_bs[-1]:
-            with record_function(
-                f"prefill_bs_{bs}_ctxlens_{forward_context.attn_metadata.context_lens}"
-            ):
+            # prefill[bs=1 tok=115 ctx=115]
+            label = f"prefill[bs={bs}"
+            if batch is not None:
+                ctx = batch.context_lens
+                ctx_str = str(ctx[0]) if len(ctx) == 1 else str(ctx.tolist())
+                label += f" tok={batch.total_tokens_num} ctx={ctx_str}"
+            label += "]"
+            with record_function(label):
                 hidden_states = self.model(input_ids, positions)
                 logits = self.model.compute_logits(hidden_states)
         else:
-            with record_function(f"decode_step_bs_{bs}"):
+            # decode[bs=128 tok=128 d=128]  or  decode[bs=128 tok=128 p=2 d=126 spec=3]
+            label = f"decode[bs={bs}"
+            if batch is not None:
+                label += f" tok={batch.total_tokens_num}"
+                if batch.total_seqs_num_prefill > 0:
+                    label += f" p={batch.total_seqs_num_prefill}"
+                label += f" d={batch.total_seqs_num_decode}"
+                if batch.num_spec_step > 0:
+                    label += f" spec={batch.num_spec_step}"
+            label += "]"
+            with record_function(label):
                 graph_bs = context.graph_bs
                 max_q_len = forward_context.attn_metadata.max_seqlen_q
                 graph_key = (graph_bs, max_q_len)
@@ -1650,7 +1669,7 @@ class ModelRunner:
     @torch.inference_mode()
     def forward(self, batch: ScheduledBatch) -> ScheduledBatchOutput:
         input_ids, temperatures, top_ks, top_ps, all_greedy = self.prepare_model(batch)
-        logits, hidden_states = self.run_model(input_ids)
+        logits, hidden_states = self.run_model(input_ids, batch)
         fwd_output = self.postprocess(
             batch,
             logits,
@@ -1671,7 +1690,6 @@ class ModelRunner:
         next_token_ids: torch.Tensor,
         num_reject_tokens: torch.Tensor,
     ):
-        # num_scheduled_tokens = batch.total_tokens_num
         forward_context = get_forward_context()
 
         positions = forward_context.context.positions
