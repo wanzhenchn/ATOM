@@ -47,6 +47,8 @@ Key entry points:
 - **Clear compile cache before server restart:** `rm -rf /root/.cache/atom/*` — stale cache causes silent failures after code changes
 - **Verify server with GPU, not just HTTP:** `curl /health` can return OK even when model is not loaded. Always check `rocm-smi --showmemuse` (VRAM% > 0) to confirm
 - **On any server/GPU error, run `/debug-guide` first** — do not blindly retry
+- **Fix-then-sweep**: after fixing a bug, immediately grep for the same pattern across the codebase and fix all occurrences in one pass
+- **Name-matches-function**: variable, function, and file names must accurately describe what they do. When behavior changes, rename immediately — stale names mislead future readers
 
 ## Key Development Patterns
 

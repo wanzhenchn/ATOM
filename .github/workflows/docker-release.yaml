@@ -52,11 +52,11 @@ jobs:
         run: echo "HF_TOKEN=${HF_TOKEN:-${{ secrets.AMD_HF_TOKEN }}}" >> $GITHUB_ENV
 
       - name: Checkout ATOM repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Login to Docker Hub
         run: |
-          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
 
       - name: Echo environment variables
         run: |
