@@ -256,7 +256,7 @@ jobs:
           echo "Model-specific environment variables for ${{ matrix.model_name }}:"
           cat /tmp/env_file.txt
 
-          docker run -dt --device=/dev/kfd $DEVICE_FLAG \
+          docker run -dt --pull always --device=/dev/kfd $DEVICE_FLAG \
           -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
           $MODEL_MOUNT \
           -w /workspace \
