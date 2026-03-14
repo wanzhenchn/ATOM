@@ -90,9 +90,11 @@ jobs:
         variant:
           - name: ""
             args: "--kv_cache_dtype fp8 -tp 8"
+            bench_args: ""
             suffix: ""
           - name: " MTP3"
             args: "--kv_cache_dtype fp8 -tp 8 --method mtp --num-speculative-tokens 3"
+            bench_args: "--use-chat-template"
             suffix: "-mtp3"
         exclude:
           # Skip low-concurrency MTP runs to limit CI time
@@ -204,7 +206,7 @@ jobs:
           docker exec atom-benchmark bash -lc "
             ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} .github/scripts/atom_test.sh launch $model_path ${{ env.ARGS }} ${{ inputs.extra_args || '' }}
             echo '========== Running benchmark test =========='
-            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} RESULT_FILENAME=${{ env.RESULT_FILENAME }} .github/scripts/atom_test.sh benchmark $model_path
+            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} RESULT_FILENAME=${{ env.RESULT_FILENAME }} BENCH_EXTRA_ARGS='${{ matrix.variant.bench_args }}' .github/scripts/atom_test.sh benchmark $model_path
             ls -all .
           "
 
@@ -350,7 +352,7 @@ jobs:
           docker exec atom-benchmark bash -lc "
             ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} .github/scripts/atom_test.sh launch $model_path ${{ env.ARGS }} ${{ inputs.extra_args || '' }}
             echo '========== Running benchmark test =========='
-            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} RESULT_FILENAME=${{ env.RESULT_FILENAME }} .github/scripts/atom_test.sh benchmark $model_path
+            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} RESULT_FILENAME=${{ env.RESULT_FILENAME }} BENCH_EXTRA_ARGS='${{ matrix.variant.bench_args }}' .github/scripts/atom_test.sh benchmark $model_path
             ls -all .
           "
 
@@ -509,7 +511,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   regression-analysis:
-    if: needs.summarize-benchmark-result.outputs.has_regression == 'true'
+    if: always() && needs.summarize-benchmark-result.outputs.has_regression == 'true'
     name: Regression Analysis (profiler trace collection)
     needs: [summarize-benchmark-result]
     runs-on: atom-mi355-8gpu.predownload

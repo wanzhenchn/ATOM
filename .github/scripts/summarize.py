@@ -57,6 +57,14 @@ def load_results(result_dir, recursive=False):
             if len(parts) == 5:
                 data.setdefault("random_input_len", int(parts[1]))
                 data.setdefault("random_output_len", int(parts[2]))
+        # Detect variant tag from filename (e.g., "deepseek-r1-0528-mtp3-1024-...")
+        stem = json_path.stem
+        if "-mtp" in stem:
+            import re as _re
+
+            m = _re.search(r"-(mtp\d*)-", stem)
+            if m:
+                data["_variant"] = m.group(1)
         results.append(data)
 
     results.sort(
@@ -72,8 +80,12 @@ def load_results(result_dir, recursive=False):
 
 def _config_key(data):
     """Unique identifier for matching a benchmark configuration across runs."""
+    model = data.get("model_id", "").split("/")[-1]
+    variant = data.get("_variant", "")
+    if variant:
+        model = f"{model}-{variant}"
     return (
-        data.get("model_id", "").split("/")[-1],
+        model,
         int(data.get("random_input_len", 0)),
         int(data.get("random_output_len", 0)),
         int(data.get("max_concurrency", 0)),

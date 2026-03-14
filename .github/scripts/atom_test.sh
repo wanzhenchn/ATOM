@@ -117,13 +117,18 @@ if [ "$TYPE" == "benchmark" ]; then
     --request-rate=inf --ignore-eos \
     --save-result --percentile-metrics="ttft,tpot,itl,e2el" \
     --result-dir=. --result-filename=${RESULT_FILENAME}.json \
-    $PROFILE_ARG
+    $PROFILE_ARG ${BENCH_EXTRA_ARGS:-}
 
   # Inject ISL/OSL into result JSON for summary table
   if [ -f "${RESULT_FILENAME}.json" ]; then
-    jq --argjson isl "$ISL" --argjson osl "$OSL" \
-      '. + {random_input_len: $isl, random_output_len: $osl}' \
-      "${RESULT_FILENAME}.json" > "${RESULT_FILENAME}.tmp" && \
-      mv "${RESULT_FILENAME}.tmp" "${RESULT_FILENAME}.json"
+    python3 -c "
+import json, sys
+with open('${RESULT_FILENAME}.json') as f:
+    d = json.load(f)
+d['random_input_len'] = int('${ISL}')
+d['random_output_len'] = int('${OSL}')
+with open('${RESULT_FILENAME}.json', 'w') as f:
+    json.dump(d, f, indent=2)
+"
   fi
 fi
