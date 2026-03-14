@@ -7,24 +7,23 @@ export VLLM_RPC_TIMEOUT=1800000
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1
 
-export VLLM_TORCH_PROFILER_DIR="qwen_plugin"
-#export VLLM_TORCH_PROFILER_WITH_STACK=1
-#export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
-export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
-
 export VLLM_CACHE_ROOT=/root/.cache/vllm
 export TORCHINDUCTOR_CACHE_DIR=/root/.cache/inductor
-
 rm -rf /root/.cache/
 
 #model_path=/data/models/Qwen3-235B-A22B-Instruct-2507-FP8/
-model_path=/it-share/models/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8/
+model_path=/home/hatwu/models/Kimi-K2-Thinking-MXFP4/
+
+export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
+PROFILER_DIR="./profiler_oot"
+mkdir -p "$PROFILER_DIR"
+PROFILER_CONFIG="--profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILER_DIR}\",\"torch_profiler_with_stack\":true,\"torch_profiler_record_shapes\":false,\"torch_profiler_with_flops\":false,\"torch_profiler_use_gzip\":true,\"torch_profiler_dump_cuda_time_total\":true,\"torch_profiler_with_memory\":false,\"ignore_frontend\":false,\"delay_iterations\":0,\"max_iterations\":0}"
+
 
 vllm serve $model_path \
     --host localhost \
     --port 8000 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
+    --tensor-parallel-size 4 \
     --trust-remote-code \
     --disable-log-requests \
     --gpu_memory_utilization 0.9 \
@@ -32,8 +31,11 @@ vllm serve $model_path \
     --load-format fastsafetensors \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
     --kv-cache-dtype fp8 \
-    --max-num-batched-tokens 18432 \
+    --max-num-batched-tokens 16384 \
     --max-model-len 16384 \
     --no-enable-prefix-caching \
-    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --attention-backend ROCM_AITER_MLA \
+    $PROFILER_CONFIG \
     2>&1 | tee log.serve.log &
+
+#   --enable-expert-parallel \
