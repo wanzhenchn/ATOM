@@ -12,7 +12,7 @@ podman run --rm -it \
     /bin/bash
 
 # docker exec -it vllm_atom_hattie /bin/bash
-#
+# podman exec -it vllm_atom_hattie /bin/bash
 # tmux new -s mysession
 # tmux attach -t mysession
 # rocm/vllm-dev:nightly_main_20260118 \

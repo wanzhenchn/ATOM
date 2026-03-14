@@ -20,5 +20,6 @@ vllm bench serve \
     --random-range-ratio 0.8 \
     --max-concurrency ${CONCURRENCY} \
     --num-prompts ${NUM_PROMPTS} \
+    --trust_remote_code \
     --percentile-metrics ttft,tpot,itl,e2el \
     --ignore-eos 2>&1 | tee log.client.log
