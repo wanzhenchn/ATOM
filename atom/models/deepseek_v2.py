@@ -1204,17 +1204,14 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=prefix,
         )
 
-        # When ATOM_ENABLE_DS_QKNORM_QUANT_FUSION is turned on, self.fuse_qknorm_quant is turned on only if FP8 or (use_triton_gemm() and FP4),
         self.prefix = prefix
         self.quant_dtype = None
         self.fuse_qknorm_quant = False
         if quant_config is not None and ENABLE_DS_QKNORM_QUANT_FUSION:
-            if layer_quant_dtype == dtypes.fp8 or (
-                layer_quant_dtype == dtypes.fp4x2 and use_triton_gemm()
-            ):
+            if layer_quant_dtype in (dtypes.fp8, dtypes.fp4x2):
                 self.quant_dtype = layer_quant_dtype
                 self.fuse_qknorm_quant = True
-                # DualRMSNorm for non-triton-GEMM path (fused dual norm + quant)
+                # DualRMSNorm: fused dual norm + quant for both FP8 and FP4 paths
                 self.qk_layernorm = DualRMSNorm(
                     self.q_a_layernorm,
                     self.kv_a_layernorm,
@@ -1338,11 +1335,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
         )
 
-        # When ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION is turned on self.fuse_input_norm_quant is turned on only if use_triton_gemm and (FP8 or FP4),
-        # Because AR_RMS and RMS_Quant cannot co-exist for input_layernorm, this block of codes ensures 3 things when ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION is turned on:
+        # input_layernorm fusion requires use_triton_gemm() (unlike QK-norm DualRMSNorm which works without it).
+        # Because AR_RMS and RMS_Quant cannot co-exist for input_layernorm, this block ensures:
         #   1. RMS_Quant fusion is only used for input_layernorm
-        #   2. The reduce_results variable is re-enabled for feed forward layers (MOE and MLP), because AR_RMS is now disabled in the beginning of the next layer
-        #   3. AR_RMS is turned off for input_layernorm but still enabled for post_attention_layernorm if ENABLE_ALLREDUCE_RMSNORM_FUSION is turned on
+        #   2. reduce_results is re-enabled for feed forward layers (MOE/MLP), since AR_RMS is disabled at the start of the next layer
+        #   3. AR_RMS is turned off for input_layernorm but still enabled for post_attention_layernorm
         self.quant_dtype = (
             None
             if quant_config is None
@@ -1364,7 +1361,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             else:
                 if layer_idx == 0:
                     logger.info(
-                        "Info: Because ATOM_USE_TRITON_GEMM is not turned on in DeepSeek-R1, ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION is turned off automatically"
+                        "Info: ATOM_USE_TRITON_GEMM is off, input_layernorm RMSNorm+quant fusion disabled (QK-norm DualRMSNorm fusion still active)"
                     )
 
         if (

@@ -44,12 +44,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "ATOM_ENABLE_RMSNORM_QUANT_FUSION", "1"
     )
     == "1",
-    # Deprecated: use ATOM_ENABLE_RMSNORM_QUANT_FUSION instead (fallback to master switch)
+    # Deprecated: falls back to ATOM_ENABLE_RMSNORM_QUANT_FUSION when unset
     "ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION": lambda: os.getenv(
         "ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION",
         os.getenv("ATOM_ENABLE_RMSNORM_QUANT_FUSION", "1"),
     )
     == "1",
+    # Deprecated: falls back to ATOM_ENABLE_RMSNORM_QUANT_FUSION when unset
     "ATOM_ENABLE_DS_QKNORM_QUANT_FUSION": lambda: os.getenv(
         "ATOM_ENABLE_DS_QKNORM_QUANT_FUSION",
         os.getenv("ATOM_ENABLE_RMSNORM_QUANT_FUSION", "1"),

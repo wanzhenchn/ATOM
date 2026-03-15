@@ -547,11 +547,12 @@ class RMSNorm(nn.Module):
 
 
 class DualRMSNorm(nn.Module):
-    """Fused dual RMSNorm + quantization for two inputs (e.g. q_c + kv_c).
+    """Fused dual RMSNorm + quantization for two inputs.
 
     Uses a single AITER kernel call to normalize both tensors and quantize
     the first, reducing kernel launch overhead vs two separate RMSNorm calls.
-    Typically used in MLA attention for the q_a + kv_a layernorms.
+    In MLA attention, normalizes q_c via q_a_layernorm and kv_c via
+    kv_a_layernorm in one fused call.
 
     Does NOT own weight parameters — references existing RMSNorm modules'
     weights so that checkpoint loading works correctly.
