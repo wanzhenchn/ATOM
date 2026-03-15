@@ -1216,9 +1216,8 @@ class DeepseekV2MLAAttention(nn.Module):
                 self.fuse_qknorm_quant = True
                 # DualRMSNorm for non-triton-GEMM path (fused dual norm + quant)
                 self.qk_layernorm = DualRMSNorm(
-                    self.q_lora_rank,
-                    self.kv_lora_rank,
-                    eps=config.rms_norm_eps,
+                    self.q_a_layernorm,
+                    self.kv_a_layernorm,
                     quant_config=quant_config,
                     transpose_scale=True,
                     shuffle=False,

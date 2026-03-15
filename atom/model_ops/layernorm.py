@@ -552,23 +552,22 @@ class DualRMSNorm(nn.Module):
     Uses a single AITER kernel call to normalize both tensors and quantize
     the first, reducing kernel launch overhead vs two separate RMSNorm calls.
     Typically used in MLA attention for the q_a + kv_a layernorms.
+
+    Does NOT own weight parameters — references existing RMSNorm modules'
+    weights so that checkpoint loading works correctly.
     """
 
     def __init__(
         self,
-        dim1: int,
-        dim2: int,
-        eps: float = 1e-6,
+        norm1: RMSNorm,
+        norm2: RMSNorm,
         quant_config: Optional[QuantizationConfig] = None,
         transpose_scale: bool = False,
         shuffle: bool = False,
     ) -> None:
         super().__init__()
-        self.dim1 = dim1
-        self.dim2 = dim2
-        self.eps = eps
-        self.weight1 = nn.Parameter(torch.ones(dim1))
-        self.weight2 = nn.Parameter(torch.ones(dim2))
+        self.norm1 = norm1
+        self.norm2 = norm2
         self.transpose_scale = transpose_scale
         self.shuffle = shuffle
 
@@ -590,11 +589,11 @@ class DualRMSNorm(nn.Module):
         """
         (x1_quant, x1_scale), _, x2_normed, _ = fuse_rmsnorm_group_quant(
             x1,
-            self.weight1,
-            self.eps,
+            self.norm1.weight,
+            self.norm1.eps,
             x2=x2,
-            x2_weight=self.weight2,
-            x2_epsilon=self.eps,
+            x2_weight=self.norm2.weight,
+            x2_epsilon=self.norm2.eps,
             dtype_quant=self.params_dtype,
             shuffle=self.shuffle,
             group_size=128,
