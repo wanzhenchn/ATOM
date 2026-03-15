@@ -378,21 +378,21 @@ class RMSNormGated(nn.Module):
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
 
-        if torch.compiler.is_compiling():
-            return self.forward_native(x, z)
-        return self.forward_native(x, z)
+        # if torch.compiler.is_compiling():
+        #     return self.forward_native(x, z)
+        # return self.forward_native(x, z)
 
-        # from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 
-        # return rmsnorm_fn(
-        #     x,
-        #     self.weight,
-        #     self.bias,
-        #     z=z,
-        #     eps=self.eps,
-        #     group_size=self.group_size,
-        #     norm_before_gate=self.norm_before_gate,
-        # )
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
 
     def forward(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
 

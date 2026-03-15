@@ -7,6 +7,9 @@ import logging
 import re
 from glob import glob
 from typing import Generator, Tuple
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 import safetensors
 import torch
@@ -36,6 +39,75 @@ from atom.models.qwen3_next_mtp import remap_mtp_weight_name
 from atom.plugin.prepare import is_sglang
 
 logger = logging.getLogger("atom")
+
+
+# WeightsMapper is adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/utils.py
+WeightsMapping = Mapping[str, str | None]
+"""If a key maps to a value of `None`, the corresponding weight is ignored."""
+
+
+@dataclass
+class WeightsMapper:
+    """Maps the name of each weight if they match the following patterns."""
+
+    orig_to_new_substr: WeightsMapping = field(default_factory=dict)
+    orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
+    orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
+
+    def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
+        """Combine two `WeightsMapper`s by merging their mappings."""
+        return WeightsMapper(
+            orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+        )
+
+    def _map_name(self, key: str) -> str | None:
+        for substr, new_key in self.orig_to_new_substr.items():
+            if substr in key:
+                if new_key is None:
+                    return None
+
+                key = key.replace(substr, new_key, 1)
+
+        for prefix, new_key in self.orig_to_new_prefix.items():
+            if key.startswith(prefix):
+                if new_key is None:
+                    return None
+
+                key = key.replace(prefix, new_key, 1)
+
+        for suffix, new_key in self.orig_to_new_suffix.items():
+            if key.endswith(suffix):
+                if new_key is None:
+                    return None
+
+                key = new_key.join(key.rsplit(suffix, 1))
+
+        return key
+
+    def apply(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        return (
+            (out_name, data)
+            for name, data in weights
+            if (out_name := self._map_name(name)) is not None
+        )
+
+    def apply_list(self, values: list[str]) -> list[str]:
+        return [
+            out_name
+            for name in values
+            if (out_name := self._map_name(name)) is not None
+        ]
+
+    def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
+        return {
+            out_name: value
+            for name, value in values.items()
+            if (out_name := self._map_name(name)) is not None
+        }
 
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -107,6 +179,7 @@ def load_model_in_plugin_mode(
     model,
     config,
     prefix: str = "",
+    weights_mapper: WeightsMapper | None = None,
 ) -> set[str]:
 
     # during loading model, the outplace operation may consume more
@@ -127,14 +200,20 @@ def load_model_in_plugin_mode(
         model_name_or_path = config.plugin_config.model_config.model_path
 
     _empty_cache()
+    config_for_loading = (
+        config.hf_config.text_config
+        if hasattr(config.hf_config, "text_config")
+        else config.hf_config
+    )
     loaded_weights_record = load_model(
         model=model,
         model_name_or_path=model_name_or_path,
-        hf_config=config.hf_config,
+        hf_config=config_for_loading,
         load_dummy=config.load_dummy,
         spec_decode=False,
         prefix=prefix,
         is_plugin_mode=True,
+        weights_mapper=weights_mapper,
     )
     _empty_cache()
     return loaded_weights_record
@@ -148,6 +227,7 @@ def load_model(
     spec_decode: bool = False,
     prefix: str = "",
     is_plugin_mode: bool = False,
+    weights_mapper: WeightsMapper | None = None,
 ):
     def have_shared_expert(name):
         maybe_matching_list = ["mlp.shared_experts.", "mlp.shared_expert."]
@@ -187,6 +267,11 @@ def load_model(
         for name, weight_tensor in safetensors_weights_iterator(
             model_name_or_path, disable_mmap=disable_mmap
         ):
+            if weights_mapper is not None:
+                mapped_name = weights_mapper._map_name(name)
+                if mapped_name is None:
+                    continue
+                name = mapped_name
             if load_dummy:
                 continue
             if name.endswith("kv_scale") or "inv_freq" in name:
