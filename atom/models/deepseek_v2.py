@@ -61,7 +61,7 @@ from atom.model_ops.activation import SiluAndMul
 from atom.model_ops.attention_mla import MLAModules, is_rocm_aiter_fp4bmm_enabled
 from atom.model_ops.base_attention import Attention
 from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
-from atom.model_ops.layernorm import LayerNorm, RMSNorm
+from atom.model_ops.layernorm import DualRMSNorm, LayerNorm, RMSNorm  # noqa: F401
 from atom.model_ops.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -1430,6 +1430,15 @@ class DeepseekV2MLAAttention(nn.Module):
             ):
                 self.quant_dtype = layer_quant_dtype
                 self.fuse_qknorm_quant = True
+                # DualRMSNorm for non-triton-GEMM path (fused dual norm + quant)
+                self.qk_layernorm = DualRMSNorm(
+                    self.q_lora_rank,
+                    self.kv_lora_rank,
+                    eps=config.rms_norm_eps,
+                    quant_config=quant_config,
+                    transpose_scale=True,
+                    shuffle=False,
+                )
 
     def forward(
         self,
@@ -1477,24 +1486,8 @@ class DeepseekV2MLAAttention(nn.Module):
                 if self.fuse_qknorm_quant:
                     (
                         (hidden_states_or_q_c, hidden_states_or_q_c_scale),
-                        _,
                         kv_c_normed,
-                        _,
-                    ) = _fuse_rmsnorm_quant(
-                        q_c,
-                        self.q_a_layernorm.weight,
-                        self.q_a_layernorm.eps,
-                        kv_c,
-                        self.kv_a_layernorm.weight,
-                        self.kv_a_layernorm.eps,
-                        None,
-                        dtype_quant=self.quant_dtype,
-                        shuffle=False,
-                        scale_shuffle_padding=False,
-                        group_size=128,
-                        output_unquantized_inp1=False,
-                        transpose_scale=True,
-                    )
+                    ) = self.qk_layernorm(q_c, kv_c)
                 else:
                     hidden_states_or_q_c = self.q_a_layernorm(q_c)
         else:
@@ -1617,6 +1610,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             fused_allreduce=self.fuse_ar_input_norm
             and self.layer_idx > 0
             and not is_mtp_block,
+            fused_quant=self.fuse_input_norm_quant,
+            quant_config=quant_config,
+            transpose_scale=True,
+            shuffle=True,
         )
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size,
@@ -1634,57 +1631,14 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # Self Attention
-        if self.fuse_input_norm_quant:
-            assert self.quant_dtype is not None
-            weight = self.input_layernorm.weight
-            eps = self.input_layernorm.eps
-            if residual is None:
-                residual = hidden_states
-                (hidden_states_quant, hidden_states_quant_scale), _, _, _ = (
-                    _fuse_rmsnorm_quant(
-                        hidden_states,
-                        weight,
-                        eps,
-                        None,
-                        None,
-                        None,
-                        None,
-                        dtype_quant=self.quant_dtype,
-                        shuffle=True,
-                        scale_shuffle_padding=True,
-                        group_size=128,
-                        output_unquantized_inp1=False,
-                        transpose_scale=True,
-                    )
-                )
-            else:
-                (hidden_states_quant, hidden_states_quant_scale), _, _, residual = (
-                    _fuse_rmsnorm_quant(
-                        hidden_states,
-                        weight,
-                        eps,
-                        None,
-                        None,
-                        None,
-                        residual,
-                        dtype_quant=self.quant_dtype,
-                        shuffle=True,
-                        scale_shuffle_padding=True,
-                        group_size=128,
-                        output_unquantized_inp1=False,
-                        transpose_scale=True,
-                    )
-                )
-
-            hidden_states = (hidden_states_quant, hidden_states_quant_scale)
-
+        # Self Attention — unified through RMSNorm.forward()
+        # fused_quant path returns (quant, scale) or ((quant, scale), residual)
+        # plain/allreduce path returns tensor or (tensor, residual)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
         else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             positions=positions,
