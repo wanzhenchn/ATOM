@@ -34,15 +34,16 @@ During `vllm serve` startup, vLLM scans installed Python packages, loads these e
 5. vLLM continues to drive request scheduling and serving, while the hot model execution path runs through ATOM model code, ATOM attention backends, and AITER-backed kernels.
 
 ## Animated Injection Flow
-Open the animated HTML flow here: [atom_vllm_oot_injection.html](./atom_vllm_oot_injection.html)
+![Animated vLLM execution flow with ATOM](./atom_vllm_oot_injection.svg)
 
-The animation shows five startup steps:
+The animation follows the OOT execution flow from server startup to one model execution step:
 
-- `vllm server` starts as the backbone runtime
-- vLLM registers `ATOMPlatform`
-- ATOM model is injected into the vLLM model registry
-- when the model runs, `ATOMPlatform` provides the attention backend
-- vLLM starts running the model through the ATOM execution path
+- `vllm serve` starts the server and initializes plugin loading
+- vLLM loads the OOT platform plugin and `register_platform()` returns `ATOMPlatform`
+- vLLM loads the general plugin and `register_model()` injects the ATOM model wrappers into `ModelRegistry`
+- during model construction, vLLM asks `ATOMPlatform.get_attn_backend_cls()` for the attention backend
+- `ATOMModelWrapper` constructs the ATOM model, loads weights, and follows the ATOM compile policy
+- after startup, each serving step builds attention metadata, runs `model.forward()`, and then `model.compute_logits()`
 
 ## Key Modules In This Integration
 - `atom.plugin.vllm.register` - vLLM plugin entry points for platform and model registration
