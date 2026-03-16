@@ -20,9 +20,6 @@ import torch
 
 logger = logging.getLogger("atom")
 
-if TYPE_CHECKING:
-    from torch.distributed import ProcessGroup
-
 
 def _create_aiter_tp_adapter_from_vllm() -> Any:
     """Create aiter-compatible TP adapter using vLLM's TP groups and aiter's ca_comm."""
@@ -84,7 +81,6 @@ def _setup_ca_comm_signal(adapter: Any, tensor_model_parallel_size: int) -> None
     ca_comm = adapter.device_communicator.ca_comm
     if ca_comm is None:
         return
-    rank = adapter.rank_in_group
     signal = torch.zeros(
         tensor_model_parallel_size * 64, dtype=torch.int64, device=adapter.device
     )
@@ -112,7 +108,9 @@ def init_aiter_tp_from_vllm(tensor_model_parallel_size: int) -> bool:
         aiter_ps._TP = adapter  # type: ignore[attr-defined]
         aiter_ps._PP = vllm_ps.get_pp_group()  # type: ignore[attr-defined]
         aiter_ps._DP = vllm_ps.get_dp_group()  # type: ignore[attr-defined]
-        aiter_ps._EP = getattr(vllm_ps, "_EP", None)  # EP may not exist in all vLLM configs
+        aiter_ps._EP = getattr(
+            vllm_ps, "_EP", None
+        )  # EP may not exist in all vLLM configs
         _setup_ca_comm_signal(adapter, tensor_model_parallel_size)
 
         from aiter.dist.parallel_state import set_custom_all_reduce
@@ -125,7 +123,5 @@ def init_aiter_tp_from_vllm(tensor_model_parallel_size: int) -> bool:
         )
         return True
     except Exception as e:
-        logger.warning(
-            "ATOM tp_group_reuse failed (%s), will use init_aiter_dist", e
-        )
+        logger.warning("ATOM tp_group_reuse failed (%s), will use init_aiter_dist", e)
         return False
