@@ -327,7 +327,9 @@ class QuantizationConfig:
         self.packed_modules_mapping = None
         if maybe_vllm_config is not None:
             # hf_to_atom_mapper = maybe_vllm_config.quant_config.vllm_hf_mapper
-            self.packed_modules_mapping = maybe_vllm_config.quant_config.packed_modules_mapping
+            self.packed_modules_mapping = (
+                maybe_vllm_config.quant_config.packed_modules_mapping
+            )
 
     def compute_hash(self) -> str:
         """
@@ -487,10 +489,13 @@ class QuantizationConfig:
     ) -> bool:
         """Match the target string or regular expression"""
 
-        # Replace layer name if packed_modules_mapping is offered 
+        # Replace layer name if packed_modules_mapping is offered
         proj_name = layer_name.split(".")[-1]
         if self.packed_modules_mapping is not None:
-            for ori_param, (model_param, shard_id) in self.packed_modules_mapping.items():
+            for ori_param, (
+                model_param,
+                shard_id,
+            ) in self.packed_modules_mapping.items():
                 if proj_name in model_param:
                     layer_name = layer_name.replace(proj_name, ori_param)
                     break
@@ -869,7 +874,10 @@ class Config:
                 eos_ids := getattr(self.generation_config, "eos_token_id", None)
             ) is not None:
                 self.stop_token_ids = [eos_ids] if isinstance(eos_ids, int) else eos_ids
-        self.quant_config = QuantizationConfig(self.hf_config, self.plugin_config.vllm_config if self.plugin_config is not None else None)
+        self.quant_config = QuantizationConfig(
+            self.hf_config,
+            self.plugin_config.vllm_config if self.plugin_config is not None else None,
+        )
         hf_config_max_position_embeddings = getattr(
             self.hf_config, "max_position_embeddings", 8192
         )

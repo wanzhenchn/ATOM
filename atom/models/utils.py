@@ -259,6 +259,7 @@ def fast_topk(values, topk, dim):
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
 
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """
     Extract the layer index from the module name.

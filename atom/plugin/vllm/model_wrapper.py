@@ -203,4 +203,3 @@ class ATOMForConditionalGeneration(
 
     def get_mrope_input_positions(self, input_tokens, mm_features):
         return self.model.get_mrope_input_positions(input_tokens, mm_features)
-
