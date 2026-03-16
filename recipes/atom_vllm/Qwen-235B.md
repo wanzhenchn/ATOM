@@ -20,7 +20,6 @@ hf download ${model_id} --local-dir ${model_path}
 ## Step 3: Launch vLLM Server
 
 ```bash
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1
 
 model_path=/data/models/Qwen3-235B-A22B-Instruct-2507-FP8
@@ -39,4 +38,35 @@ vllm serve $model_path \
     --max-num-batched-tokens 20000 \
     --no-enable-prefix-caching \
     2>&1 | tee log.serve.log &
+```
+
+### Optional: Enable OOT Profiling
+If you want to collect OOT profiles, export the following env vars and add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
+
+```bash
+export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
+export VLLM_TORCH_PROFILER_WITH_STACK=1
+export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
+export VLLM_TORCH_PROFILER_DIR=./
+
+profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":%s,"torch_profiler_record_shapes":%s}' \
+    "${VLLM_TORCH_PROFILER_DIR}" \
+    "$([[ "${VLLM_TORCH_PROFILER_WITH_STACK:-0}" == "1" ]] && echo true || echo false)" \
+    "$([[ "${VLLM_TORCH_PROFILER_RECORD_SHAPES:-0}" == "1" ]] && echo true || echo false)")
+```
+
+## Step 4: Validate Accuracy With lm_eval
+
+```bash
+addr=localhost
+port=8000
+url=http://${addr}:${port}/v1/completions
+model=/data/models/Qwen3-235B-A22B-Instruct-2507-FP8
+task=gsm8k
+
+lm_eval --model local-completions \
+        --model_args model=${model},base_url=${url},num_concurrent=16,max_retries=3,tokenized_requests=False \
+        --tasks ${task} \
+        --num_fewshot 3 \
+        2>&1 | tee log.lmeval.log
 ```

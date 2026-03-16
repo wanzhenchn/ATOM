@@ -80,6 +80,23 @@ vllm serve $model_path \
     2>&1 | tee log.serve.log &
 ```
 
+Some model-specific recipes may require extra optimization env vars. For example, `ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1` is only needed by the Qwen OOT recipe and is not a generic OOT requirement.
+
+### Optional: Enable OOT Profiling
+If you want to collect OOT profiles, export the following env vars and add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
+
+```bash
+export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
+export VLLM_TORCH_PROFILER_WITH_STACK=1
+export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
+export VLLM_TORCH_PROFILER_DIR=./
+
+profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":%s,"torch_profiler_record_shapes":%s}' \
+    "${VLLM_TORCH_PROFILER_DIR}" \
+    "$([[ "${VLLM_TORCH_PROFILER_WITH_STACK:-0}" == "1" ]] && echo true || echo false)" \
+    "$([[ "${VLLM_TORCH_PROFILER_RECORD_SHAPES:-0}" == "1" ]] && echo true || echo false)")
+```
+
 If your model has not been downloaded yet, use the following command to download the model weights inside the container first:
 
 ```bash
@@ -108,8 +125,12 @@ url=http://${addr}:${port}/v1/completions
 model=<your model file path>
 task=gsm8k
 lm_eval --model local-completions \
-        --model_args model=${model},base_url=${url},num_concurrent=65,max_retries=1,tokenized_requests=False \
+        --model_args model=${model},base_url=${url},num_concurrent=16,max_retries=3,tokenized_requests=False \
         --tasks ${task} \
         --num_fewshot 3 \
         2>&1 | tee log.lmeval.log
 ```
+
+## Limitations
+- Data parallelism in the OOT path has not been fully validated yet and may not be mature enough for all scenarios.
+- Multi-modal models are not supported by the current OOT integration.

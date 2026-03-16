@@ -2,6 +2,8 @@
 
 This recipe shows how to run `GPT-OSS-120B` with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM-ATOM-OOT-Plugin-Backend](./vLLM-ATOM-OOT-Plugin-Backend.md).
 
+> **Note:** `TP8` currently has known accuracy issues for GPT-OSS in the OOT path. If accuracy is important, do not use `TP8` until this issue is fixed.
+
 ## Step 1: Pull the OOT Docker
 
 ```bash
@@ -22,6 +24,8 @@ hf download ${model_id} --local-dir ${model_path}
 ```bash
 model_path=/data/models/gpt-oss-120b
 
+export ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1
+
 vllm serve $model_path \
     --host localhost \
     --port 8000 \
@@ -32,4 +36,35 @@ vllm serve $model_path \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
     --no-enable-prefix-caching \
     2>&1 | tee log.serve.log &
+```
+
+### Optional: Enable OOT Profiling
+If you want to collect OOT profiles, export the following env vars and add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
+
+```bash
+export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
+export VLLM_TORCH_PROFILER_WITH_STACK=1
+export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
+export VLLM_TORCH_PROFILER_DIR=./
+
+profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":%s,"torch_profiler_record_shapes":%s}' \
+    "${VLLM_TORCH_PROFILER_DIR}" \
+    "$([[ "${VLLM_TORCH_PROFILER_WITH_STACK:-0}" == "1" ]] && echo true || echo false)" \
+    "$([[ "${VLLM_TORCH_PROFILER_RECORD_SHAPES:-0}" == "1" ]] && echo true || echo false)")
+```
+
+## Step 4: Validate Accuracy With lm_eval
+
+```bash
+addr=localhost
+port=8000
+url=http://${addr}:${port}/v1/completions
+model=/data/models/gpt-oss-120b
+task=gsm8k
+
+lm_eval --model local-completions \
+        --model_args model=${model},base_url=${url},num_concurrent=16,max_retries=3,tokenized_requests=False \
+        --tasks ${task} \
+        --num_fewshot 3 \
+        2>&1 | tee log.lmeval.log
 ```
