@@ -33,7 +33,7 @@ During `vllm serve` startup, vLLM scans installed Python packages, loads these e
 4. When a supported model is instantiated, the ATOM wrapper creates the ATOM plugin config, initializes the ATOM/AITER runtime state, and constructs the ATOM model implementation.
 5. vLLM continues to drive request scheduling and serving, while the hot model execution path runs through ATOM model code, ATOM attention backends, and AITER-backed kernels.
 
-## Animated Injection Flow
+## Execution flow of vLLM + ATOM
 ![Animated vLLM execution flow with ATOM](./atom_vllm_oot_injection.svg)
 
 The animation follows the OOT execution flow from server startup to one model execution step:
