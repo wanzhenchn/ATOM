@@ -52,6 +52,17 @@ The animation follows the OOT execution flow from server startup to one model ex
 - `atom.model_ops.attentions.aiter_attention` - ATOM MHA attention backend for vLLM plugin mode
 - `atom.model_ops.attentions.aiter_mla` - ATOM MLA attention backend for vLLM plugin mode
 
+## Supported Models
+The current OOT model wrapper supports the following model architectures:
+
+| HF architecture | ATOM model implementation | Model family example |
+|---|---|---|
+| `Qwen3ForCausalLM` | `atom.models.qwen3.Qwen3ForCausalLM` | Qwen3 dense |
+| `Qwen3MoeForCausalLM` | `atom.models.qwen3_moe.Qwen3MoeForCausalLM` | Qwen3 MoE |
+| `GptOssForCausalLM` | `atom.models.gpt_oss.GptOssForCausalLM` | GPT-OSS |
+| `DeepseekV3ForCausalLM` | `atom.models.deepseek_v2.DeepseekV3ForCausalLM` | DeepSeek-R1 / DeepSeek V3 style models |
+| `Glm4MoeForCausalLM` | `atom.models.glm4_moe.Glm4MoeForCausalLM` | GLM-4-MoE |
+
 ## Preparing Environment For vLLM With ATOM Plugin Backend
 Pull the docker image for vLLM with ATOM Plugin Backend. The docker image is automatically released on the ATOM side.
 
