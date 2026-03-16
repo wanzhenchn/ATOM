@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ATOM OOT Flow in vLLM</title>
+    <style>
+      :root {
+        --bg-0: #08101d;
+        --bg-1: #111b30;
+        --panel: rgba(18, 28, 47, 0.88);
+        --panel-border: #2b3957;
+        --text: #f5fbff;
+        --muted: #b2c0d8;
+        --muted-2: #d9e3f2;
+        --blue: #6bc8ff;
+        --green: #6ce7bc;
+        --orange: #ffb768;
+        --shadow: 0 18px 40px rgba(3, 8, 20, 0.42);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", Arial, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 12% 12%, rgba(107, 200, 255, 0.1), transparent 28%),
+          radial-gradient(circle at 88% 18%, rgba(108, 231, 188, 0.08), transparent 30%),
+          radial-gradient(circle at 74% 88%, rgba(255, 183, 104, 0.08), transparent 28%),
+          linear-gradient(135deg, var(--bg-0), var(--bg-1));
+      }
+
+      main {
+        max-width: 1260px;
+        margin: 0 auto;
+        padding: 38px 32px 46px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 34px;
+        line-height: 1.15;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+
+      .subtitle {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.4;
+      }
+
+      .summary {
+        display: inline-flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 18px;
+      }
+
+      .pill {
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted-2);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .flow {
+        position: relative;
+        margin-top: 34px;
+        padding-top: 42px;
+      }
+
+      .track {
+        position: absolute;
+        top: 16px;
+        left: 100px;
+        right: 100px;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+
+      .track-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--blue), var(--green), var(--orange));
+        transition: width 500ms ease;
+      }
+
+      .tracker-dot {
+        position: absolute;
+        top: 8px;
+        left: 100px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow:
+          0 0 0 5px rgba(107, 200, 255, 0.12),
+          0 0 24px rgba(107, 200, 255, 0.85);
+        transform: translateX(-50%);
+        transition:
+          left 500ms ease,
+          box-shadow 500ms ease;
+      }
+
+      .steps {
+        display: flex;
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .step {
+        position: relative;
+        min-height: 272px;
+        min-width: 0;
+        padding: 18px 18px 20px;
+        border-radius: 24px;
+        border: 2px solid var(--panel-border);
+        background: linear-gradient(180deg, rgba(24, 35, 59, 0.96), rgba(17, 27, 48, 0.94));
+        box-shadow: var(--shadow);
+        opacity: 0.28;
+        transform: translateY(14px) scale(0.985);
+        transition:
+          opacity 420ms ease,
+          transform 420ms ease,
+          border-color 420ms ease,
+          box-shadow 420ms ease;
+      }
+
+      .step[data-step="0"] {
+        flex: 1 1 0;
+      }
+
+      .step[data-step="1"] {
+        flex: 1.1 1 0;
+      }
+
+      .step[data-step="2"] {
+        flex: 1.15 1 0;
+      }
+
+      .step[data-step="3"] {
+        flex: 1.45 1 0;
+      }
+
+      .step[data-step="4"] {
+        flex: 1.1 1 0;
+      }
+
+      .step::before {
+        content: "";
+        position: absolute;
+        top: -34px;
+        left: 50%;
+        width: 14px;
+        height: 14px;
+        margin-left: -7px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.18);
+        border: 2px solid rgba(255, 255, 255, 0.12);
+        transition:
+          transform 420ms ease,
+          background 420ms ease,
+          box-shadow 420ms ease;
+      }
+
+      .step.done {
+        opacity: 0.58;
+        transform: translateY(0) scale(1);
+      }
+
+      .step.done::before {
+        background: rgba(255, 255, 255, 0.8);
+        box-shadow: 0 0 18px rgba(255, 255, 255, 0.24);
+      }
+
+      .step.active {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
+      .step.active::before {
+        transform: scale(1.18);
+        box-shadow: 0 0 20px currentColor;
+      }
+
+      .step.active.step-blue {
+        border-color: rgba(107, 200, 255, 0.72);
+        box-shadow:
+          0 18px 40px rgba(3, 8, 20, 0.42),
+          0 0 0 1px rgba(107, 200, 255, 0.16),
+          0 0 24px rgba(107, 200, 255, 0.18);
+      }
+
+      .step.active.step-green {
+        border-color: rgba(108, 231, 188, 0.72);
+        box-shadow:
+          0 18px 40px rgba(3, 8, 20, 0.42),
+          0 0 0 1px rgba(108, 231, 188, 0.16),
+          0 0 24px rgba(108, 231, 188, 0.18);
+      }
+
+      .step.active.step-orange {
+        border-color: rgba(255, 183, 104, 0.72);
+        box-shadow:
+          0 18px 40px rgba(3, 8, 20, 0.42),
+          0 0 0 1px rgba(255, 183, 104, 0.16),
+          0 0 24px rgba(255, 183, 104, 0.18);
+      }
+
+      .step-blue {
+        color: var(--blue);
+      }
+
+      .step-green {
+        color: var(--green);
+      }
+
+      .step-orange {
+        color: var(--orange);
+      }
+
+      .chip {
+        display: inline-block;
+        padding: 7px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        color: #d9e6f8;
+        border: 1px solid currentColor;
+        background: color-mix(in srgb, currentColor 14%, transparent);
+      }
+
+      .step h2 {
+        margin: 18px 0 0;
+        color: var(--text);
+        font-size: 22px;
+        line-height: 1.2;
+        font-weight: 700;
+      }
+
+      .step p {
+        margin: 16px 0 0;
+        color: var(--muted-2);
+        font-size: 15px;
+        line-height: 1.5;
+      }
+
+      .code {
+        margin-top: 14px;
+        padding: 12px 14px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #9fd5ff;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 13px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      @media (max-width: 1180px) {
+        .steps {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+
+        .flow {
+          padding-top: 0;
+        }
+
+        .track,
+        .tracker-dot {
+          display: none;
+        }
+
+        .step::before {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>ATOM OOT flow in vLLM</h1>
+      <div class="subtitle">ATOM works as vLLM OOT Platform</div>
+
+      <div class="summary">
+        <div class="pill">vLLM keeps server, scheduler, workers, and runtime flow</div>
+        <div class="pill">ATOM provides model implementation, attention, and execution</div>
+      </div>
+
+      <section class="flow" aria-label="Animated OOT startup flow">
+        <div class="track">
+          <div class="track-fill" id="trackFill"></div>
+        </div>
+        <div class="tracker-dot" id="trackerDot"></div>
+
+        <div class="steps">
+          <article class="step step-blue" data-step="0">
+            <div class="chip">Step 1</div>
+            <h2>vLLM server starts</h2>
+            <p>vLLM starts the backbone runtime for serving, scheduling, and worker orchestration.</p>
+            <div class="code">vllm serve</div>
+          </article>
+
+          <article class="step step-green" data-step="1">
+            <div class="chip">Step 2</div>
+            <h2>Register ATOMPlatform</h2>
+            <p>vLLM discovers the ATOM plugin and registers the injected platform.</p>
+            <div class="code">register_platform()
+-&gt; ATOMPlatform</div>
+          </article>
+
+          <article class="step step-green" data-step="2">
+            <div class="chip">Step 3</div>
+            <h2>Inject ATOM model</h2>
+            <p>ATOM updates the vLLM model registry so supported architectures resolve to ATOM wrappers.</p>
+            <div class="code">register_model()
+-&gt; ModelRegistry override</div>
+          </article>
+
+          <article class="step step-orange" data-step="3">
+            <div class="chip">Step 4</div>
+            <h2>Provide attention backend</h2>
+            <p>When the model runs, the injected ATOM platform provides the attention backend to vLLM.</p>
+            <div class="code">ATOMPlatform
+.get_attn_backend_cls()
+-&gt; AiterBackend
+or AiterMLABackend</div>
+          </article>
+
+          <article class="step step-blue" data-step="4">
+            <div class="chip">Step 5</div>
+            <h2>Start running model</h2>
+            <p>vLLM continues to drive the framework, while the model execution path runs through ATOM.</p>
+            <div class="code">ATOMForCausalLM
+ATOMMoEForCausalLM</div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const flow = document.querySelector(".flow");
+      const steps = Array.from(document.querySelectorAll(".step"));
+      const track = document.querySelector(".track");
+      const trackFill = document.getElementById("trackFill");
+      const trackerDot = document.getElementById("trackerDot");
+      const cycleMs = 2200;
+      let current = -1;
+
+      function getCenters() {
+        const flowRect = flow.getBoundingClientRect();
+        return steps.map((step) => {
+          const rect = step.getBoundingClientRect();
+          return rect.left - flowRect.left + rect.width / 2;
+        });
+      }
+
+      function renderStep(index) {
+        const centers = getCenters();
+        const firstCenter = centers[0];
+        const currentCenter = centers[index];
+        const lastCenter = centers[centers.length - 1];
+
+        steps.forEach((step, stepIndex) => {
+          step.classList.toggle("active", stepIndex === index);
+          step.classList.toggle("done", stepIndex < index);
+        });
+
+        track.style.left = `${firstCenter}px`;
+        track.style.right = `${flow.clientWidth - lastCenter}px`;
+        trackFill.style.width = `${Math.max(currentCenter - firstCenter, 0)}px`;
+        trackerDot.style.left = `${currentCenter}px`;
+
+        const activeStep = steps[index];
+        if (activeStep.classList.contains("step-green")) {
+          trackerDot.style.boxShadow =
+            "0 0 0 5px rgba(108, 231, 188, 0.12), 0 0 24px rgba(108, 231, 188, 0.85)";
+        } else if (activeStep.classList.contains("step-orange")) {
+          trackerDot.style.boxShadow =
+            "0 0 0 5px rgba(255, 183, 104, 0.12), 0 0 24px rgba(255, 183, 104, 0.85)";
+        } else {
+          trackerDot.style.boxShadow =
+            "0 0 0 5px rgba(107, 200, 255, 0.12), 0 0 24px rgba(107, 200, 255, 0.85)";
+        }
+      }
+
+      function advance() {
+        current = (current + 1) % steps.length;
+        renderStep(current);
+      }
+
+      advance();
+      window.setInterval(advance, cycleMs);
+      window.addEventListener("resize", () => {
+        renderStep(current < 0 ? 0 : current);
+      });
+    </script>
+  </body>
+</html>

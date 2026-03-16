@@ -1,14 +1,66 @@
 # vLLM out-of-tree ATOM Plugin Backend
-ATOM can work as the OOT plugin backend of vLLM. The OOT register mechanism is quite mature and most of accelerators have leveraged this design to register their devices into vLLM without any code changes in upper framework. ATOM follows this design and provide the layer/op, even the entire model implementations to vLLM. The frontend users can launch vLLM server like before and there is no need to specify any arguments or env flags. Meanwhile the ATOM platform can leverage most of the vLLM features and focus more on model- and kernel-level optimizations. For the overall design, here is a RFC to enable ATOM work as the OOT plugin platform of vLLM: https://github.com/ROCm/ATOM/issues/201
+ATOM can work as the out-of-tree (OOT) plugin backend of vLLM. In this design, ATOM is not merged into the vLLM source tree and does not require patching vLLM code. Instead, ATOM is installed as a separate Python package and plugged into vLLM through vLLM's official plugin interfaces. This keeps the integration clean while letting ATOM reuse the mature serving and runtime features already provided by vLLM.
 
-## Preparing environment for vLLM with ATOM Plugin Backend
-Pull the docker image for vLLM with ATOM Plugin Backend. The docker image is automatically released on ATOM side.
+This integration follows the direction described in the [RFC to enable ATOM as a vLLM out-of-tree platform](https://github.com/ROCm/ATOM/issues/201). The high-level idea is that vLLM remains the framework-level runtime, while ATOM focuses on model-level and kernel-level optimization for AMD GPUs. In this mode, ATOM serves as the optimized execution backend and an incubation layer for new kernels, fusions, and model implementations before they are mature enough to be upstreamed.
+
+## What The OOT Design Means
+In practice, the responsibilities are split as follows:
+
+| Layer | Responsibility |
+|---|---|
+| vLLM | API server, CLI, engine, scheduler, worker orchestration, cache management, and framework-level features |
+| ATOM | Platform plugin, model registry overrides, model wrappers, attention backends, and the optimized execution path built around ATOM/AITER integrations |
+| Integration boundary | vLLM calls the official plugin hooks, while ATOM implements the required platform and model interfaces without changing vLLM source |
+
+This relationship is important: ATOM is not replacing vLLM as a serving framework. Instead, ATOM plugs optimized model execution components into the extension points that vLLM already exposes.
+
+## How The Integration Works
+When the `atom` package is installed in the same Python environment as `vllm`, two entry points are exposed following the official vLLM plugin convention:
+
+```toml
+[project.entry-points."vllm.platform_plugins"]
+atom = "atom.plugin.vllm.register:register_platform"
+
+[project.entry-points."vllm.general_plugins"]
+atom_model_registry = "atom.plugin.vllm.register:register_model"
+```
+
+During `vllm serve` startup, vLLM scans installed Python packages, loads these entry points, and activates the ATOM hooks:
+
+1. `register_platform()` returns `atom.plugin.vllm.platform.ATOMPlatform`, so vLLM resolves `current_platform` to the ATOM platform.
+2. `register_model()` updates selected vLLM `ModelRegistry` entries to ATOM wrappers such as `ATOMForCausalLM` and `ATOMMoEForCausalLM`.
+3. When vLLM constructs attention layers, `ATOMPlatform.get_attn_backend_cls()` returns `atom.model_ops.attentions.aiter_attention.AiterBackend` or `atom.model_ops.attentions.aiter_mla.AiterMLABackend`.
+4. When a supported model is instantiated, the ATOM wrapper creates the ATOM plugin config, initializes the ATOM/AITER runtime state, and constructs the ATOM model implementation.
+5. vLLM continues to drive request scheduling and serving, while the hot model execution path runs through ATOM model code, ATOM attention backends, and AITER-backed kernels.
+
+## Animated Injection Flow
+Open the animated HTML flow here: [atom_vllm_oot_injection.html](./atom_vllm_oot_injection.html)
+
+The animation shows five startup steps:
+
+- `vllm server` starts as the backbone runtime
+- vLLM registers `ATOMPlatform`
+- ATOM model is injected into the vLLM model registry
+- when the model runs, `ATOMPlatform` provides the attention backend
+- vLLM starts running the model through the ATOM execution path
+
+## Key Modules In This Integration
+- `atom.plugin.vllm.register` - vLLM plugin entry points for platform and model registration
+- `atom.plugin.vllm.platform` - the ATOM platform class exposed to vLLM
+- `atom.plugin.vllm.model_wrapper` - ATOM model wrappers used by vLLM model construction
+- `atom.model_ops.attentions.aiter_attention` - ATOM MHA attention backend for vLLM plugin mode
+- `atom.model_ops.attentions.aiter_mla` - ATOM MLA attention backend for vLLM plugin mode
+
+## Preparing Environment For vLLM With ATOM Plugin Backend
+Pull the docker image for vLLM with ATOM Plugin Backend. The docker image is automatically released on the ATOM side.
+
 ```bash
 docker pull rocm/atom-dev:vllm-latest
 ```
 
-### Launching server of vLLM with ATOM OOT Plugin Platform
-There is no code change to vLLM side, so you can launch the vLLM server like before without any specific argument and env flags
+### Launching Server Of vLLM With ATOM OOT Plugin Platform
+There is no code change required on the vLLM side, so you can launch the vLLM server as usual without introducing any ATOM-specific CLI argument.
+
 ```bash
 model_path=<your model file path>
 
@@ -26,22 +78,28 @@ vllm serve $model_path \
     --no-enable-prefix-caching \
     2>&1 | tee log.serve.log &
 ```
-If your model has not been downloaded, please use below command to directly download your model weight first in docker
+
+If your model has not been downloaded yet, use the following command to download the model weights inside the container first:
+
 ```bash
 hf download <your model name> --local-dir <your model file path>
 ```
 
-If you want to disable the ATOM OOT plugin platform and model register, you can use below env flags. The default value is 0
+If you want to disable the ATOM OOT plugin platform and model registration, you can use the following env flag. The default value is `0`:
+
 ```bash
 export ATOM_DISABLE_VLLM_PLUGIN=1
 ```
-If you only want to disable the ATOM Attention Backend, you can use below env flags.  The default value is 0. In most cases, it is not recommended to disable the ATOM Attention
+
+If you only want to disable the ATOM attention backend, you can use the following env flag. The default value is `0`. In most cases, it is not recommended to disable the ATOM attention backend:
+
 ```bash
 export ATOM_DISABLE_VLLM_PLUGIN_ATTENTION=1
 ```
 
-### Launching client for validating the accuracy
-After server launched, you can begin your workloads. Here is an example for testing the accuracy for model
+### Launching Client For Validating Accuracy
+After the server is launched, you can begin your workloads. Here is an example for validating accuracy:
+
 ```bash
 addr=localhost
 port=8000
