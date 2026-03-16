@@ -91,8 +91,6 @@ vllm serve $model_path \
     2>&1 | tee log.serve.log &
 ```
 
-Some model-specific recipes may require extra optimization env vars. For example, `ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1` is only needed by the Qwen OOT recipe and is not a generic OOT requirement.
-
 ### Optional: Enable OOT Profiling
 If you want to collect OOT profiles, export the following env vars and add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
 
