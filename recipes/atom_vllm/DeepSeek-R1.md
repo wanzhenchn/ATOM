@@ -40,7 +40,6 @@ vllm serve $model_path \
     --port 8000 \
     --tensor-parallel-size 8 \
     --kv-cache-dtype fp8 \
-    --disable-log-requests \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
@@ -58,7 +57,6 @@ vllm serve $model_path \
     --port 8000 \
     --tensor-parallel-size 8 \
     --kv-cache-dtype fp8 \
-    --disable-log-requests \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \

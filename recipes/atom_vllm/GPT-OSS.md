@@ -30,7 +30,6 @@ vllm serve $model_path \
     --host localhost \
     --port 8000 \
     --kv-cache-dtype fp8 \
-    --disable-log-requests \
     --gpu_memory_utilization 0.3 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \

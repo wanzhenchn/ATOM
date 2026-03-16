@@ -30,7 +30,6 @@ vllm serve $model_path \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --kv-cache-dtype fp8 \
-    --disable-log-requests \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
