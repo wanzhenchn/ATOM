@@ -322,7 +322,7 @@ class QuantizationConfig:
         else:
             self.parse_other_config()
 
-        if self.exclude_layers is None and maybe_vllm_config is not None:
+        if len(self.exclude_layers) == 0 and maybe_vllm_config is not None:
             self.exclude_layers = maybe_vllm_config.quant_config.ignored_layers
         self.packed_modules_mapping = None
         if maybe_vllm_config is not None:
