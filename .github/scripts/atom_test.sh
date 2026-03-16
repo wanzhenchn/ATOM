@@ -9,9 +9,12 @@ EXTRA_ARGS=("${@:3}")
 if [ "$TYPE" == "launch" ]; then
   echo ""
   echo "========== Launching ATOM server =========="
+  # Clear stale compile cache to avoid NameError from outdated generated code
+  echo "Clearing compile cache..."
+  rm -rf ~/.cache/atom/*
   PROFILER_ARGS=""
   if [ "${ENABLE_TORCH_PROFILER:-0}" == "1" ]; then
-    PROFILER_ARGS="--torch-profiler-dir /app/trace"
+    PROFILER_ARGS="--torch-profiler-dir /app/trace --mark-trace"
     echo "Torch profiler enabled, trace output: /app/trace"
   fi
   ATOM_SERVER_LOG="/tmp/atom_server.log"
@@ -98,9 +101,18 @@ if [ "$TYPE" == "accuracy" ]; then
   chmod -R 777 accuracy_test_results
 fi
 
+if [ "$TYPE" == "stop" ]; then
+  echo ""
+  echo "========== Stopping ATOM server =========="
+  pkill -f 'atom.entrypoints' || true
+  sleep 5
+  echo "Server stopped."
+fi
+
 if [ "$TYPE" == "benchmark" ]; then
   echo ""
   echo "========== Running benchmark test =========="
+  RESULT_FILENAME=${RESULT_FILENAME:-benchmark_result}
   PROFILE_ARG=""
   if [ "${ENABLE_TORCH_PROFILER:-0}" == "1" ]; then
     PROFILE_ARG="--profile"
@@ -111,7 +123,7 @@ if [ "$TYPE" == "benchmark" ]; then
     --dataset-name=random \
     --random-input-len=$ISL --random-output-len=$OSL --random-range-ratio=$RANDOM_RANGE_RATIO \
     --max-concurrency=$CONC \
-    --num-prompts=$(( $CONC * 10 )) \
+    --num-prompts=${NUM_PROMPTS_OVERRIDE:-$(( $CONC * 10 ))} \
     --trust-remote-code \
     --num-warmups=1 \
     --request-rate=inf --ignore-eos \
