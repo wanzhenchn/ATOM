@@ -283,6 +283,8 @@ def load_model(
                 name = mapped_name
             if load_dummy:
                 continue
+            if "mtp" in name and not spec_decode:
+                continue
             if name.endswith("kv_scale") or "inv_freq" in name:
                 continue
             if spec_decode:
@@ -322,8 +324,6 @@ def load_model(
             for k in packed_modules_mapping:
                 # We handle the experts below in expert_params_mapping
                 if "mlp.experts." in name and name not in params_dict:
-                    continue
-                if "mtp" in name and not spec_decode:
                     continue
                 if k in name:
                     packed_value = packed_modules_mapping[k]
