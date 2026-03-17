@@ -319,8 +319,12 @@ jobs:
             echo '=== Installing ATOM ==='
             cd /workspace
             pip install -e .
-            echo '=== Installed ATOM version ==='
-            pip show atom
+
+            echo '=== Installed package versions ==='
+            pip show amd-aiter | grep -E '^(Name|Version):'
+            pip show atom | grep -E '^(Name|Version):'
+            pip show triton | grep -E '^(Name|Version):'
+            pip show torch | grep -E '^(Name|Version):'
           "
 
       - name: Download models
