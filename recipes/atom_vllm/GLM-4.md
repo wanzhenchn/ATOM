@@ -1,6 +1,6 @@
 # GLM-4-MoE with ATOM vLLM OOT Platform
 
-This recipe shows how to run a `GLM-4-MoE` checkpoint with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM-ATOM-OOT-Plugin-Backend](./vLLM-ATOM-OOT-Plugin-Backend.md).
+This recipe shows how to run a `GLM-4-MoE` checkpoint with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 The checkpoint used here should expose the `Glm4MoeForCausalLM` architecture so it can be picked up by the ATOM OOT model override.
 
@@ -20,6 +20,8 @@ hf download ${model_id} --local-dir ${model_path}
 ```
 
 ## Step 3: Launch vLLM Server
+
+The vLLM OOT plugin backend keeps the standard vLLM CLI, server APIs, and general usage flow compatible with upstream vLLM. For general server options and API usage, refer to the [official vLLM documentation](https://docs.vllm.ai/en/latest/).
 
 ```bash
 model_path=/data/models/glm4-moe

@@ -242,7 +242,7 @@ lm_eval --model local-completions \
 
 **Framework Integration:**
 
-- [vLLM Plugin Backend](recipes/vLLM-ATOM-OOT-Plugin-Backend.md) — ATOM as out-of-tree plugin for vLLM
+- [vLLM OOT Plugin Backend](docs/vllm_plugin_backend_guide.md) — ATOM as the OOT plugin backend for vLLM
 - [SGLang Model Backend](recipes/SGLang-ATOM-Model-Impl-Backend.md) — ATOM as model implementation backend for SGLang
 
 ## Acknowledgements
