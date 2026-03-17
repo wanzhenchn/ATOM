@@ -60,14 +60,22 @@ The current OOT model wrapper supports the following model architectures:
 | `Qwen3ForCausalLM` | `atom.models.qwen3.Qwen3ForCausalLM` | Qwen3 dense |
 | `Qwen3MoeForCausalLM` | `atom.models.qwen3_moe.Qwen3MoeForCausalLM` | Qwen3 MoE |
 | `GptOssForCausalLM` | `atom.models.gpt_oss.GptOssForCausalLM` | GPT-OSS |
-| `DeepseekV3ForCausalLM` | `atom.models.deepseek_v2.DeepseekV3ForCausalLM` | DeepSeek-R1 / DeepSeek V3 style models |
+| `DeepseekV3ForCausalLM` | `atom.models.deepseek_v2.DeepseekV3ForCausalLM` | DeepSeek-R1 / DeepSeek V3 / Kimi-K2 style models |
 | `Glm4MoeForCausalLM` | `atom.models.glm4_moe.Glm4MoeForCausalLM` | GLM-4-MoE |
+
+`Kimi-K2` is also supported. Although it is usually loaded with `--trust-remote-code`, it shares the same DeepSeek-style MLA+MoE architecture path and reuses `atom.models.deepseek_v2.DeepseekV3ForCausalLM` in the ATOM vLLM OOT backend.
 
 ## Preparing Environment For vLLM With ATOM Plugin Backend
 Pull the docker image for vLLM with ATOM Plugin Backend. The docker image is automatically released on the ATOM side.
 
 ```bash
 docker pull rocm/atom-dev:vllm-latest
+```
+
+If you need an OOT docker image for a specific vLLM version or a specific release date, browse the available tags on [Docker Hub](https://hub.docker.com/r/rocm/atom-dev/tags) and pull the exact tag you need there. For example, to pull the OOT docker adapted to vLLM `0.17.0` on `2026-03-15`:
+
+```bash
+docker pull rocm/atom-dev:vllm-v0.17.0-nightly_20260315
 ```
 
 ### Launching Server Of vLLM With ATOM OOT Plugin Platform
