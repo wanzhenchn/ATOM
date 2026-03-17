@@ -2135,7 +2135,7 @@ class FusedMoE(torch.nn.Module):
                 tp_rank=tp_rank,
                 load_full=load_full_w2,
             )
-        elif shard_id in ("w1", "w3", "w13"):
+        elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
@@ -2173,9 +2173,6 @@ class FusedMoE(torch.nn.Module):
         tp_rank: int,
     ):
 
-        if shard_id == "w13":
-            expert_data.view(torch.uint8).copy_(loaded_weight.view(torch.uint8))
-            return
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         expert_shard_size = expert_data.shape[shard_dim] // 2
@@ -2360,15 +2357,15 @@ class FusedMoE(torch.nn.Module):
         ):
             loaded_weight = loaded_weight.t().contiguous()
 
-        if shard_id not in ("w1", "w2", "w3", "w13"):
+        if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(
-                f"shard_id must be ['w1','w2','w3', 'w13'] but " f"got {shard_id}."
+                f"shard_id must be ['w1','w2','w3'] but " f"got {shard_id}."
             )
 
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
-        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0, "w13": 0}
+        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
@@ -2638,27 +2635,26 @@ class FusedMoE(torch.nn.Module):
         ckpt_up_proj_name: str,
         num_experts: int,
         has_bias: bool = False,
-        maybe_cktp_gate_up_proj_name: Optional[str] = None,
     ) -> List[Tuple[str, str, int, str]]:
-        w13_weight_name = [ckpt_gate_proj_name, ckpt_up_proj_name]
-        shard_list = [
-            ("w1", ckpt_gate_proj_name),
-            ("w2", ckpt_down_proj_name),
-            ("w3", ckpt_up_proj_name),
-        ]
-        if maybe_cktp_gate_up_proj_name is not None:
-            w13_weight_name.append(maybe_cktp_gate_up_proj_name)
-            shard_list.append(("w13", maybe_cktp_gate_up_proj_name))
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                ("experts.w13_" if weight_name in w13_weight_name else "experts.w2_"),
+                (
+                    "experts.w13_"
+                    if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
+                    else "experts.w2_"
+                ),
                 f"experts.{expert_id}.{weight_name}.",
                 expert_id,
                 shard_id,
             )
             for expert_id in range(num_experts)
-            for shard_id, weight_name in shard_list
+            for shard_id, weight_name in [
+                ("w1", ckpt_gate_proj_name),
+                ("w2", ckpt_down_proj_name),
+                ("w3", ckpt_up_proj_name),
+            ]
         ]
 
     def extra_repr(self) -> str:
