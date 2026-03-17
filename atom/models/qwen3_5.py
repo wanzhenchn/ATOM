@@ -525,7 +525,6 @@ class Qwen3_5ForCausalLMBase(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        print("hidden states shape: ", hidden_states.shape)
         return self.lm_head(hidden_states)
 
 
@@ -630,7 +629,7 @@ if is_vllm():
             with self._mark_language_model(vllm_config):
                 self.language_model = Qwen3_5ForCausalLM(
                     atom_config=atom_config,
-                    prefix=maybe_prefix(prefix, "language_model"),
+                    prefix=maybe_prefix("", "language_model"),
                 )
             self.make_empty_intermediate_tensors = (
                 self.language_model.make_empty_intermediate_tensors
@@ -676,7 +675,6 @@ if is_vllm():
                 "model.language_model.": "language_model.model.",
             }
         )
-        # hf_to_vllm_mapper = hf_to_atom_mapper
 
         def __init__(self, atom_config: Config, prefix: str = "model"):
             # protocols have not __init__ method, so we need to use nn.Module.__init__
@@ -712,9 +710,6 @@ if is_vllm():
                 self.language_model.make_empty_intermediate_tensors
             )
 
-            # set MoE hyperparameters
-            # self.set_moe_parameters()
-
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             # load weights in plugin mode and discard passed weights generator
             # here prefix is "model." because Qwen3ForCausalLM is constructed in model
@@ -737,7 +732,7 @@ if is_vllm():
 
     @MULTIMODAL_REGISTRY.register_processor(
         Qwen3VLMultiModalProcessor,
-        info=Qwen3_5MoeProcessingInfo,
+        info=Qwen3_5ProcessingInfo,
         dummy_inputs=Qwen3VLDummyInputsBuilder,
     )
     class Qwen3_5ForConditionalGeneration(ATOMForConditionalGeneration, IsHybrid):

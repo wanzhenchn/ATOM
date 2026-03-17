@@ -59,8 +59,6 @@ support_model_arch_dict = {
     "GlmMoeDsaForCausalLM": "atom.models.deepseek_v2.GlmMoeDsaForCausalLM",
     "Glm4MoeForCausalLM": "atom.models.glm4_moe.Glm4MoeForCausalLM",
     "Qwen3NextForCausalLM": "atom.models.qwen3_next.Qwen3NextForCausalLM",
-    "Qwen3_5ForConditionalGeneration": "atom.models.qwen3_5.Qwen3_5ForConditionalGeneration",
-    "Qwen3_5MoeForConditionalGeneration": "atom.models.qwen3_5.Qwen3_5MoeForConditionalGeneration",
 }
 # seed = 34567
 # np.random.seed(seed)
@@ -583,11 +581,7 @@ class ModelRunner:
         )
         self.model = model_class(config)
         torch.set_default_device(None)
-        if hasattr(config.hc_config, "text_config"):
-            config_for_loading = config.hf_config.text_config
-        else:
-            config_for_loading = config.hf_config
-        load_model(self.model, config.model, config_for_loading, config.load_dummy)
+        load_model(self.model, config.model, config.hf_config, config.load_dummy)
         logger.info(f"Model load done: {config.model}")
 
         if hasattr(self, "drafter"):

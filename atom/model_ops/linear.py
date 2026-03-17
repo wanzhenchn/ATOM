@@ -49,9 +49,13 @@ if use_triton_gemm():
         gemm_afp4wfp4_preshuffle = None
 
     # For Triton FP8 Blockscale GEMM is mostly slower then AITER GEMM, we turn off Triton FP8 GEMM
-    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
-        gemm_a8w8_blockscale_preshuffle as gemm_a8w8_blockscale_bpreshuffle_triton,
-    )
+    try:
+        from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
+            gemm_a8w8_blockscale_preshuffle as gemm_a8w8_blockscale_bpreshuffle_triton,
+        )  # noqa: E402
+    except ImportError as e:
+        logger.warning(f"Triton w8a8 GEMM not available: {e}")
+        gemm_a8w8_blockscale_bpreshuffle_triton = None
 else:
     gemm_afp4wfp4_preshuffle = None
     gemm_a8w8_blockscale_bpreshuffle_triton = None
