@@ -23,6 +23,8 @@ from atom.config import get_current_atom_config
 from atom.model_ops.linear import use_triton_gemm
 from atom.model_ops.utils import get_and_maybe_dequant_weights
 from atom.utils import envs
+from atom.utils.decorators import mark_trace
+
 from atom.utils.forward_context import (
     AttentionMetaData,
     ForwardContext,
@@ -38,6 +40,15 @@ from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched
 from atom.plugin import is_plugin_mode
 
 from atom.plugin.attention_mla import MLAAttentionImplDecoratorForPluginMode
+
+concat_and_cache_mla = mark_trace(
+    concat_and_cache_mla, prefix="kv_cache", torch_compile=False
+)
+fused_qk_rope_concat_and_cache_mla = mark_trace(
+    fused_qk_rope_concat_and_cache_mla, prefix="rope_and_kv_cache", torch_compile=False
+)
+mla_prefill_fwd = mark_trace(mla_prefill_fwd, prefix="mla_prefill", torch_compile=False)
+mla_decode_fwd = mark_trace(mla_decode_fwd, prefix="mla_decode", torch_compile=False)
 
 # torch.set_printoptions(threshold=10_000)
 
@@ -194,6 +205,7 @@ class MLAAttention(nn.Module):
                 W_V, dtype=dtypes.fp8
             )
 
+    @mark_trace(prefix="v_up_proj_and_o_proj", torch_compile=False)
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -228,6 +240,7 @@ class MLAAttention(nn.Module):
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return self.o_proj(x)
 
+    @mark_trace(prefix="q_proj_and_k_up_proj", torch_compile=False)
     def _q_proj_and_k_up_proj(self, x, x_scale=None):
         q_nope, q_pe = (
             self.q_proj(x, x_scale)
@@ -485,9 +498,7 @@ class MLAAttention(nn.Module):
                     paged_kv_indices,
                     kv_last_page_lens,
                     max_q_len,
-                    self.scale,
-                    0.0,
-                    None,
+                    sm_scale=self.scale,
                     q_scale=self._q_scale,
                     kv_scale=self._k_scale,
                 )

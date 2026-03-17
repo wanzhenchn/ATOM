@@ -48,12 +48,15 @@ jobs:
       GPU_ARCH: "gfx942;gfx950"
 
     steps:
+      - name: Set HF_TOKEN
+        run: echo "HF_TOKEN=${HF_TOKEN:-${{ secrets.AMD_HF_TOKEN }}}" >> $GITHUB_ENV
+
       - name: Checkout ATOM repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Login to Docker Hub
         run: |
-          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
 
       - name: Echo environment variables
         run: |
@@ -70,7 +73,6 @@ jobs:
           docker build --pull --network=host -t atom_release:ci \
           --build-arg BASE_IMAGE="${{ matrix.base_image }}" \
           --build-arg GPU_ARCH="${{ env.GPU_ARCH }}" \
-          --build-arg MAX_JOBS=64 \
           --build-arg ATOM_REPO="${{ inputs.atom_repo || env.ATOM_REPO }}" \
           --build-arg ATOM_COMMIT="${{ inputs.atom_commit || env.ATOM_COMMIT }}" \
           --build-arg AITER_REPO="${{ inputs.aiter_repo || env.AITER_REPO }}" \
@@ -140,5 +142,10 @@ jobs:
       - name: Clean Up
         if: always()
         run: |
-          docker stop atom_release || true
-          docker rm atom_release || true
+          docker stop atom_release_ci || true
+          docker rm atom_release_ci || true
+          # Remove build and tagged images to free disk space
+          docker rmi atom_release:ci || true
+          docker rmi rocm/atom-dev:latest || true
+          # Remove nightly tagged image if it exists
+          docker images "rocm/atom-dev:nightly_*" -q | xargs -r docker rmi || true
