@@ -37,19 +37,14 @@ vllm serve $model_path \
     2>&1 | tee log.serve.log &
 ```
 
-### Optional: Enable OOT Profiling
-If you want to collect OOT profiles, export the following env vars and add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
+### Optional: Enable Profiling
+If you want to collect profiles, add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
 
 ```bash
-export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
-export VLLM_TORCH_PROFILER_WITH_STACK=1
-export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
-export VLLM_TORCH_PROFILER_DIR=./
+profiler_dir=./
 
-profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":%s,"torch_profiler_record_shapes":%s}' \
-    "${VLLM_TORCH_PROFILER_DIR}" \
-    "$([[ "${VLLM_TORCH_PROFILER_WITH_STACK:-0}" == "1" ]] && echo true || echo false)" \
-    "$([[ "${VLLM_TORCH_PROFILER_RECORD_SHAPES:-0}" == "1" ]] && echo true || echo false)")
+profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":true,"torch_profiler_record_shapes":true}' \
+    "${profiler_dir}")
 ```
 
 ## Step 4: Validate Accuracy With lm_eval
