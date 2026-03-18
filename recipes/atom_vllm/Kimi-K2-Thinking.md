@@ -1,6 +1,6 @@
 # Kimi-K2-Thinking with ATOM vLLM OOT Platform
 
-This recipe shows how to run `Kimi-K2-Thinking` with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
+This recipe shows how to run `Kimi-K2-Thinking` with the ATOM vLLM out-of-tree platform. For background on the OOT backend, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 This model uses remote code, so the launch command keeps `--trust-remote-code`.
 

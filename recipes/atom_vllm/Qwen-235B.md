@@ -1,6 +1,6 @@
 # Qwen3-235B-A22B with ATOM vLLM OOT Platform
 
-This recipe shows how to run `Qwen3-235B-A22B-Instruct-2507-FP8` with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
+This recipe shows how to run `Qwen3-235B-A22B-Instruct-2507-FP8` with the ATOM vLLM out-of-tree platform. For background on the OOT backend, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 ## Step 1: Pull the OOT Docker
 

@@ -1,6 +1,6 @@
 # GPT-OSS with ATOM vLLM OOT Platform
 
-This recipe shows how to run `GPT-OSS-120B` with the ATOM vLLM out-of-tree platform. For the overall OOT design and plugin flow, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
+This recipe shows how to run `GPT-OSS-120B` with the ATOM vLLM out-of-tree platform. For background on the OOT backend, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 > **Note:** `TP8` currently has known accuracy issues for GPT-OSS in the OOT path. If accuracy is important, do not use `TP8` until this issue is fixed.
 
