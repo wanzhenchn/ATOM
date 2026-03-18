@@ -1,6 +1,5 @@
 from collections.abc import Iterable
 from contextlib import nullcontext
-from functools import wraps
 
 import importlib
 import torch
@@ -10,7 +9,7 @@ from aiter.dist.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.models.interfaces import (
     SupportsPP,
@@ -72,46 +71,63 @@ def _is_torch_profile_enabled(vllm_config: VllmConfig) -> bool:
 
 
 def _patch_vllm_profile_labels() -> None:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker import gpu_model_runner as gpu_model_runner_mod
+    from vllm.v1 import utils as v1_utils_mod
 
-    # `GPUModelRunner._model_forward()` stays in Python for eager, piecewise,
-    # full cudagraph replay, and ubatch modes. We patch here so OOT can add
-    # step labels without modifying vLLM source files.
-    if not getattr(GPUModelRunner, "_atom_step_label_patched", False):
-        original_model_forward = GPUModelRunner._model_forward
+    # Use vLLM's existing step boundary in execute_model():
+    #
+    #   with set_forward_context(...),
+    #        record_function_or_nullcontext("gpu_model_runner: forward"):
+    #       model_output = self._model_forward(...)
+    #
+    # This encloses the real model run for eager, piecewise, and full graph
+    # modes, so a single dynamic label hook here is simpler than patching
+    # separate execution paths. Note that gpu_model_runner imported
+    # `record_function_or_nullcontext` by value, so patching only v1.utils is
+    # not sufficient after import; we patch the local symbol in
+    # gpu_model_runner as well.
+    if not getattr(gpu_model_runner_mod, "_atom_step_label_patched", False):
+        original_record_ctx = gpu_model_runner_mod.record_function_or_nullcontext
+        original_utils_record_ctx = v1_utils_mod.record_function_or_nullcontext
 
-        @wraps(original_model_forward)
-        def _wrapped_model_forward(
-            self,
-            input_ids=None,
-            positions=None,
-            intermediate_tensors=None,
-            inputs_embeds=None,
-            **model_kwargs,
-        ):
-            record_label = None
-            prof_enabled = _is_torch_profile_enabled(self.vllm_config)
-            if prof_enabled and is_forward_context_available():
-                record_label = _build_step_profiler_label()
+        class _DynamicForwardRecordContext:
+            def __init__(self, name: str, original_ctx):
+                self.name = name
+                self.original_ctx = original_ctx
+                self.ctx = nullcontext()
 
-            print('[zejun] record_label = ', record_label, flush=True)
+            def __enter__(self):
+                if self.name == "gpu_model_runner: forward":
+                    vllm_config = get_current_vllm_config_or_none()
+                    if (
+                        vllm_config is not None
+                        and _is_torch_profile_enabled(vllm_config)
+                        and is_forward_context_available()
+                    ):
+                        record_label = _build_step_profiler_label()
+                        if record_label is not None:
+                            self.ctx = record_function(record_label)
+                            return self.ctx.__enter__()
 
-            with (
-                record_function(record_label)
-                if record_label is not None
-                else nullcontext()
-            ):
-                return original_model_forward(
-                    self,
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
+                self.ctx = self.original_ctx(self.name)
+                return self.ctx.__enter__()
 
-        GPUModelRunner._model_forward = _wrapped_model_forward
-        GPUModelRunner._atom_step_label_patched = True
+            def __exit__(self, exc_type, exc, tb):
+                return self.ctx.__exit__(exc_type, exc, tb)
+
+        def _wrapped_gpu_record_function_or_nullcontext(name: str):
+            return _DynamicForwardRecordContext(name, original_record_ctx)
+
+        def _wrapped_utils_record_function_or_nullcontext(name: str):
+            return _DynamicForwardRecordContext(name, original_utils_record_ctx)
+
+        gpu_model_runner_mod.record_function_or_nullcontext = (
+            _wrapped_gpu_record_function_or_nullcontext
+        )
+        v1_utils_mod.record_function_or_nullcontext = (
+            _wrapped_utils_record_function_or_nullcontext
+        )
+        gpu_model_runner_mod._atom_step_label_patched = True
 
 
 def _get_step_attn_metadata_list():
