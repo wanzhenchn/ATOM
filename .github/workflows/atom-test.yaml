@@ -463,3 +463,6 @@ jobs:
           fi
           docker stop "$CONTAINER_NAME" || true
           docker rm "$CONTAINER_NAME" || true
+          # Remove the pre-built image to free disk space on the runner
+          docker rmi "rocm/atom-dev:pre-build-${{ env.GITHUB_COMMIT_SHA }}" || true
+
