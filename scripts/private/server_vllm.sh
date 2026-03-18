@@ -12,7 +12,8 @@ export TORCHINDUCTOR_CACHE_DIR=/root/.cache/inductor
 rm -rf /root/.cache/
 
 #model_path=/data/models/Qwen3-235B-A22B-Instruct-2507-FP8/
-model_path=/home/hatwu/models/Kimi-K2-Thinking-MXFP4/
+#model_path=/home/hatwu/models/Kimi-K2-Thinking-MXFP4/
+#model_path=/models/amd/DeepSeek-R1-MXFP4
 
 export VLLM_CUSTOM_SCOPES_FOR_PROFILING=1
 PROFILER_DIR="./profiler_oot"
@@ -23,7 +24,7 @@ PROFILER_CONFIG="--profiler-config {\"profiler\":\"torch\",\"torch_profiler_dir\
 vllm serve $model_path \
     --host localhost \
     --port 8000 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 8 \
     --trust-remote-code \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \
@@ -33,7 +34,6 @@ vllm serve $model_path \
     --max-num-batched-tokens 16384 \
     --max-model-len 16384 \
     --no-enable-prefix-caching \
-    --attention-backend ROCM_AITER_MLA \
     $PROFILER_CONFIG \
     2>&1 | tee log.serve.log &
 
