@@ -75,8 +75,8 @@ def _patch_vllm_profile_labels() -> None:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     # `GPUModelRunner._model_forward()` stays in Python for eager, piecewise,
-    # full cudagraph replay, and ubatch modes, so one patch here covers all of
-    # those execution paths without modifying vLLM source files.
+    # full cudagraph replay, and ubatch modes. We patch here so OOT can add
+    # step labels without modifying vLLM source files.
     if not getattr(GPUModelRunner, "_atom_step_label_patched", False):
         original_model_forward = GPUModelRunner._model_forward
 
@@ -90,10 +90,11 @@ def _patch_vllm_profile_labels() -> None:
             **model_kwargs,
         ):
             record_label = None
-            if _is_torch_profile_enabled(
-                self.vllm_config
-            ) and is_forward_context_available():
+            prof_enabled = _is_torch_profile_enabled(self.vllm_config)
+            if prof_enabled and is_forward_context_available():
                 record_label = _build_step_profiler_label()
+
+            print('[zejun] record_label = ', record_label, flush=True)
 
             with (
                 record_function(record_label)
