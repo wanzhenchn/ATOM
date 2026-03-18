@@ -125,6 +125,7 @@ def _patch_vllm_profile_labels() -> None:
                         and is_forward_context_available()
                     ):
                         record_label = _build_step_profiler_label()
+                        print('[zejun] record_label = ', record_label, flush=True)
                         if record_label is not None:
                             self.ctx = record_function(record_label)
                             return self.ctx.__enter__()
