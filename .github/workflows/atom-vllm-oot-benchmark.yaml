@@ -60,8 +60,8 @@ on:
 
 env:
   BASE_IMAGE: ${{ inputs.base_image || 'rocm/atom-dev:latest' }}
-  GITHUB_REPO_URL: https://github.com/ROCm/ATOM.git
-  GITHUB_COMMIT_SHA: ${{ github.sha }}
+  GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/ROCm/ATOM.git' }}
+  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   VALIDATION_IMAGE_REPO: rocm/atom-dev
 
 jobs:
