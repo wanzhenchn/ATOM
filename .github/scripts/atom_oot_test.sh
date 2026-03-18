@@ -55,15 +55,15 @@ LAST_VLLM_LOG_LINE=0
 # current matrix entry via OOT_MODEL_* env vars so model coverage does not drift
 # when the workflow matrix changes.
 CI_MODE_MODELS=(
-  "Kimi-K2-Thinking-MXFP4|amd/Kimi-K2-Thinking-MXFP4|--trust-remote-code --kv-cache-dtype fp8 --tensor-parallel-size 4 --enable-expert-parallel"
+  "Kimi-K2-Thinking-MXFP4|amd/Kimi-K2-Thinking-MXFP4|--trust-remote-code --tensor-parallel-size 4"
 )
 
 FULL_MODE_MODELS=(
-  "Qwen3 MoE|Qwen/Qwen3-235B-A22B-Instruct-2507-FP8|--trust-remote-code --kv-cache-dtype fp8 --tensor-parallel-size 8 --enable-expert-parallel"
-  "DeepSeek-R1 FP8|deepseek-ai/DeepSeek-R1-0528|--trust-remote-code --kv-cache-dtype fp8 --tensor-parallel-size 8"
-  "DeepSeek-R1 MXFP4|amd/DeepSeek-R1-0528-MXFP4|--trust-remote-code --kv-cache-dtype fp8 --tensor-parallel-size 8"
-  "GPT-OSS|openai/gpt-oss-120b|--trust-remote-code --kv-cache-dtype fp8 --gpu-memory-utilization 0.3"
-  "Kimi-K2|amd/Kimi-K2-Thinking-MXFP4|--trust-remote-code --kv-cache-dtype fp8 --tensor-parallel-size 8 --enable-expert-parallel"
+  "Qwen3 MoE|Qwen/Qwen3-235B-A22B-Instruct-2507-FP8|--trust-remote-code --tensor-parallel-size 8 --enable-expert-parallel"
+  "DeepSeek-R1 FP8|deepseek-ai/DeepSeek-R1-0528|--trust-remote-code --tensor-parallel-size 8"
+  "DeepSeek-R1 MXFP4|amd/DeepSeek-R1-0528-MXFP4|--trust-remote-code --tensor-parallel-size 8"
+  "GPT-OSS|openai/gpt-oss-120b|--trust-remote-code --tensor-parallel-size 1"
+  "Kimi-K2|amd/Kimi-K2-Thinking-MXFP4|--trust-remote-code --tensor-parallel-size 8"
 )
 
 declare -a ACTIVE_MODELS=()
@@ -170,7 +170,6 @@ launch_one_model() {
   echo "Extra args: ${extra_args}"
 
   export SAFETENSORS_FAST_GPU=1
-  export VLLM_ROCM_USE_AITER=1
   export VLLM_RPC_TIMEOUT=1800000
   export VLLM_CACHE_ROOT=/tmp/.cache/vllm
   export TORCHINDUCTOR_CACHE_DIR=/tmp/.cache/inductor
@@ -183,8 +182,9 @@ launch_one_model() {
     --port "${VLLM_PORT}" \
     --async-scheduling \
     --load-format fastsafetensors \
-    --max-model-len 16384 \
     "${extra_arg_array[@]}" \
+    --kv-cache-dtype fp8 \
+    --gpu-memory-utilization 0.9 \
     > "${VLLM_LOG_FILE}" 2>&1 &
   echo $! > "${VLLM_PID_FILE}"
   echo "Server PID: $(cat "${VLLM_PID_FILE}")"

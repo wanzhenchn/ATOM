@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-"""Summarize ATOM benchmark results with optional regression detection.
+"""Summarize benchmark results with optional regression detection.
 
 Usage:
     # Basic (existing behavior):
@@ -25,6 +25,10 @@ TRACKED_METRICS = [
     ("mean_ttft_ms", "Mean TTFT", False),
     ("mean_tpot_ms", "Mean TPOT", False),
 ]
+
+
+def _backend_name(data):
+    return str(data.get("benchmark_backend", "ATOM")).upper()
 
 
 def load_results(result_dir, recursive=False):
@@ -69,6 +73,7 @@ def load_results(result_dir, recursive=False):
 
     results.sort(
         key=lambda d: (
+            _backend_name(d),
             _display_model(d),
             int(d.get("random_input_len", 0)),
             int(d.get("random_output_len", 0)),
@@ -90,6 +95,7 @@ def _display_model(data):
 def _config_key(data):
     """Unique identifier for matching a benchmark configuration across runs."""
     return (
+        _backend_name(data),
         _display_model(data),
         int(data.get("random_input_len", 0)),
         int(data.get("random_output_len", 0)),
@@ -131,7 +137,7 @@ def print_results_table(results):
             datetime.datetime.strptime(data.get("date", ""), "%Y%m%d-%H%M%S").strftime(
                 "%Y-%m-%d %H:%M:%S"
             ),
-            "ATOM",
+            _backend_name(data),
             _display_model(data),
             data.get("random_input_len", ""),
             data.get("random_output_len", ""),
@@ -191,7 +197,7 @@ def print_regression_report(current_results, baseline_results):
         f"or latency increase **>{LATENCY_REGRESSION_PCT:.0f}%**\n"
     )
 
-    cols = ["Model", "ISL", "OSL", "Conc"]
+    cols = ["Backend", "Model", "ISL", "OSL", "Conc"]
     for _, display_name, _ in TRACKED_METRICS:
         cols.append(display_name)
     cols.append("Status")
@@ -205,8 +211,8 @@ def print_regression_report(current_results, baseline_results):
     for data in current_results:
         key = _config_key(data)
         baseline = baseline_map.get(key)
-        model, isl, osl, conc = key
-        row = [model, str(isl), str(osl), str(conc)]
+        backend, model, isl, osl, conc = key
+        row = [backend, model, str(isl), str(osl), str(conc)]
 
         has_regression = False
         metric_deltas = {}
@@ -232,6 +238,7 @@ def print_regression_report(current_results, baseline_results):
             regression_count += 1
             regressions.append(
                 {
+                    "backend": backend,
                     "model": model,
                     "model_id": data.get("model_id", ""),
                     "isl": isl,
@@ -304,6 +311,7 @@ def main():
             "regressions": regressions,
             "all_results": [
                 {
+                    "backend": _backend_name(d),
                     "model": _display_model(d),
                     "isl": int(d.get("random_input_len", 0)),
                     "osl": int(d.get("random_output_len", 0)),

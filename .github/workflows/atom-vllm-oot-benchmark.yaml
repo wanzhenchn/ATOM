@@ -1,0 +1,583 @@
+name: ATOM vLLM OOT Benchmark
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+on:
+  schedule:
+    # Nightly at 02:00 Beijing time (18:00 UTC)
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      qwen3-moe:
+        description: "Benchmark Qwen3 MoE"
+        type: boolean
+        default: true
+      deepseek-r1-fp8:
+        description: "Benchmark DeepSeek-R1 FP8"
+        type: boolean
+        default: true
+      deepseek-r1-mxfp4:
+        description: "Benchmark DeepSeek-R1 MXFP4"
+        type: boolean
+        default: true
+      gpt-oss-120b:
+        description: "Benchmark gpt-oss-120b"
+        type: boolean
+        default: true
+      kimi-k2-thinking-mxfp4:
+        description: "Benchmark Kimi-K2-Thinking-MXFP4"
+        type: boolean
+        default: true
+      base_image:
+        description: "ATOM base image used to build the OOT benchmark image"
+        type: string
+        default: "rocm/atom-dev:latest"
+      vllm_commit:
+        description: "vLLM commit used by the OOT benchmark image"
+        type: string
+        default: "b31e9326a7d9394aab8c767f8ebe225c65594b60"
+      vllm_version:
+        description: "vLLM version label used in the benchmark image tag"
+        type: string
+        default: "0.17"
+      param_lists:
+        description: |
+          "Benchmark parameter lists.
+          Input as a single or multiple sets (comma-separated, semicolon between sets),
+          format: input_length,output_length,concurrency,random_range_ratio.
+          Example (single set): 1024,1024,128,0.8
+          Example (multiple sets): 1024,1024,128,0.8;2048,1024,256,0.7"
+        type: string
+        default: "1024,1024,128,0.8"
+
+env:
+  BASE_IMAGE: ${{ inputs.base_image || 'rocm/atom-dev:latest' }}
+  GITHUB_REPO_URL: https://github.com/ROCm/ATOM.git
+  GITHUB_COMMIT_SHA: ${{ github.sha }}
+  VALIDATION_IMAGE_REPO: rocm/atom-dev
+
+jobs:
+  parse-param-lists:
+    name: Parse parameter lists
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.parse-param-lists.outputs.matrix_json }}
+    env:
+      # Nightly params aligned with native benchmark so dashboard comparisons stay apples-to-apples.
+      NIGHTLY_PARAM_LISTS: "1024,1024,1,0.8;1024,1024,2,0.8;1024,1024,4,0.8;1024,1024,8,0.8;1024,1024,16,0.8;1024,1024,32,0.8;1024,1024,64,0.8;1024,1024,128,0.8;1024,1024,256,0.8;1024,8192,1,0.8;1024,8192,2,0.8;1024,8192,4,0.8;1024,8192,8,0.8;1024,8192,16,0.8;1024,8192,32,0.8;8192,1024,1,0.8;8192,1024,2,0.8;8192,1024,4,0.8;8192,1024,8,0.8;8192,1024,16,0.8;8192,1024,32,0.8;8192,1024,64,0.8;8192,1024,128,0.8"
+    steps:
+      - name: Parse parameter lists
+        id: parse-param-lists
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            PARAM_LISTS="${{ env.NIGHTLY_PARAM_LISTS }}"
+            echo "Using nightly param lists (1k1k, 1k8k, 8k1k with multiple concurrency)"
+            echo "PARAM_LISTS: ${PARAM_LISTS}"
+          else
+            PARAM_LISTS="${{ inputs.param_lists || '1024,1024,128,0.8' }}"
+            echo "Using param_lists: ${PARAM_LISTS}"
+          fi
+          IFS=';' read -ra SETS <<< "${PARAM_LISTS}"
+          MATRIX_JSON="["
+          SEP=""
+          for SET in "${SETS[@]}"; do
+            IFS=',' read -ra PARAMS <<< "$SET"
+            INPUT_LEN="${PARAMS[0]}"
+            OUTPUT_LEN="${PARAMS[1]}"
+            CONCURRENCY="${PARAMS[2]}"
+            RANDOM_RANGE_RATIO="${PARAMS[3]}"
+            MATRIX_JSON="${MATRIX_JSON}${SEP}{\"input_length\":${INPUT_LEN},\"output_length\":${OUTPUT_LEN},\"concurrency\":${CONCURRENCY},\"random_range_ratio\":${RANDOM_RANGE_RATIO}}"
+            SEP=","
+          done
+          MATRIX_JSON="${MATRIX_JSON}]"
+          echo "matrix_json=${MATRIX_JSON}" >> "$GITHUB_OUTPUT"
+
+      - name: Print matrix JSON
+        run: |
+          echo "Matrix JSON: ${{ steps.parse-param-lists.outputs.matrix_json }}"
+
+  load-models:
+    name: Load OOT model configs
+    runs-on: ubuntu-latest
+    outputs:
+      models_json: ${{ steps.load.outputs.models_json }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: load
+        run: echo "models_json=$(jq -c . .github/benchmark/oot_models.json)" >> "$GITHUB_OUTPUT"
+
+  build-oot-image:
+    name: Build OOT benchmark image
+    runs-on: build-only-atom
+    outputs:
+      oot_image_tag: ${{ steps.meta.outputs.oot_image_tag }}
+    steps:
+      - name: Checkout ATOM repo
+        uses: actions/checkout@v6
+
+      - name: Docker Login
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Generate OOT base Dockerfile
+        run: |
+          cat <<EOF > Dockerfile.mod
+          FROM ${{ env.BASE_IMAGE }}
+          RUN pip install -U lm-eval[api]
+          RUN pip show lm-eval || true
+          RUN pip install hf_transfer
+          RUN pip show hf_transfer || true
+          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show amd-aiter || true
+          RUN pip uninstall -y amd-aiter
+          RUN pip install --upgrade "pybind11>=3.0.1"
+          RUN pip show pybind11
+          RUN rm -rf /app/aiter-test
+          RUN git clone --depth 1 https://github.com/ROCm/aiter.git /app/aiter-test && \\
+              cd /app/aiter-test && \\
+              git checkout HEAD && \\
+              git submodule sync && git submodule update --init --recursive && \\
+              MAX_JOBS=64 PREBUILD_KERNELS=0 GPU_ARCHS=gfx950 python3 setup.py develop
+          RUN echo "=== Aiter version AFTER installation ===" && pip show amd-aiter || true
+          RUN echo "=== ATOM version BEFORE uninstall ===" && pip show atom || true
+          RUN pip uninstall -y atom
+          RUN rm -rf /app/ATOM
+          RUN git clone ${{ env.GITHUB_REPO_URL }} /app/ATOM && \\
+              cd /app/ATOM && \\
+              git checkout ${{ env.GITHUB_COMMIT_SHA }} && \\
+              pip install -e .
+          RUN echo "=== ATOM version AFTER installation ===" && pip show atom || true
+          EOF
+
+      - name: Build OOT base image
+        run: |
+          docker build --pull --network=host \
+            --no-cache \
+            -t atom_oot_base:benchmark \
+            -f Dockerfile.mod .
+
+      - name: Build OOT vLLM image from current commit
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_COMMIT_SHA::12}"
+          OOT_IMAGE_TAG="${VALIDATION_IMAGE_REPO}:oot-vllm-benchmark-v${{ inputs.vllm_version || '0.17' }}-${SHORT_SHA}-${{ github.run_id }}"
+          docker build --network=host \
+            --no-cache \
+            -t "${OOT_IMAGE_TAG}" \
+            --target atom_oot \
+            --build-arg OOT_BASE_IMAGE="atom_oot_base:benchmark" \
+            --build-arg MAX_JOBS=64 \
+            --build-arg VLLM_COMMIT="${{ inputs.vllm_commit || 'b31e9326a7d9394aab8c767f8ebe225c65594b60' }}" \
+            --build-arg INSTALL_LM_EVAL=1 \
+            --build-arg INSTALL_FASTSAFETENSORS=1 \
+            -f docker/Dockerfile .
+          echo "oot_image_tag=${OOT_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Push OOT benchmark image
+        run: |
+          docker push "${{ steps.meta.outputs.oot_image_tag }}"
+
+  benchmark:
+    name: OOT ${{ matrix.model.display }} (isl=${{ matrix.config.input_length }} osl=${{ matrix.config.output_length }} c=${{ matrix.config.concurrency }})
+    needs: [parse-param-lists, load-models, build-oot-image]
+    if: >-
+      always()
+      && needs.parse-param-lists.result == 'success'
+      && needs.load-models.result == 'success'
+      && needs.build-oot-image.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJson(needs.parse-param-lists.outputs.matrix_json) }}
+        model: ${{ fromJson(needs.load-models.outputs.models_json) }}
+    runs-on: ${{ matrix.model.runner }}
+    timeout-minutes: 240
+    env:
+      MODEL_NAME: ${{ matrix.model.display }}
+      MODEL_PATH: ${{ matrix.model.path }}
+      OOT_EXTRA_ARGS: ${{ matrix.model.extra_args }}
+      BENCH_EXTRA_ARGS: ${{ matrix.model.bench_args }}
+      ISL: ${{ matrix.config.input_length }}
+      OSL: ${{ matrix.config.output_length }}
+      CONC: ${{ matrix.config.concurrency }}
+      RANDOM_RANGE_RATIO: ${{ matrix.config.random_range_ratio }}
+      RESULT_FILENAME: ${{ matrix.model.prefix }}-${{ matrix.config.input_length }}-${{ matrix.config.output_length }}-${{ matrix.config.concurrency }}-${{ matrix.config.random_range_ratio }}
+      CONTAINER_NAME: atom_vllm_oot_benchmark_${{ strategy.job-index }}
+      OOT_IMAGE_TAG: ${{ needs.build-oot-image.outputs.oot_image_tag }}
+      BENCH_SERVING_REPO_URL: https://github.com/kimbochen/bench_serving.git
+    steps:
+      - name: Check if model is enabled
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            case "${{ matrix.model.prefix }}" in
+              qwen3-moe) echo "enabled=${{ inputs.qwen3-moe }}" >> "$GITHUB_OUTPUT" ;;
+              deepseek-r1-fp8) echo "enabled=${{ inputs.deepseek-r1-fp8 }}" >> "$GITHUB_OUTPUT" ;;
+              deepseek-r1-mxfp4) echo "enabled=${{ inputs.deepseek-r1-mxfp4 }}" >> "$GITHUB_OUTPUT" ;;
+              gpt-oss-120b) echo "enabled=${{ inputs.gpt-oss-120b }}" >> "$GITHUB_OUTPUT" ;;
+              kimi-k2-thinking-mxfp4) echo "enabled=${{ inputs.kimi-k2-thinking-mxfp4 }}" >> "$GITHUB_OUTPUT" ;;
+              *) echo "enabled=true" >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+      - name: Clean up containers and workspace
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          echo "=== Cleaning up containers on $(hostname) ==="
+          containers=$(docker ps -q)
+          if [ -n "$containers" ]; then
+            docker kill $containers || true
+          fi
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "ls -la /workspace/ && rm -rf /workspace/*" || true
+
+      - name: Checkout ATOM repo
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@v6
+
+      - name: Docker Login
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Set HF_TOKEN
+        if: steps.check.outputs.enabled == 'true'
+        run: echo "HF_TOKEN=${HF_TOKEN:-${{ secrets.AMD_HF_TOKEN }}}" >> "$GITHUB_ENV"
+
+      - name: Pull built OOT image
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          docker pull "${OOT_IMAGE_TAG}"
+
+      - name: Prepare model cache mount
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          model_path="${{ matrix.model.path }}"
+          MODEL_CACHE_HOST_ROOT=""
+          MODEL_CACHE_MOUNT=""
+          MODEL_CACHE_DESC="container-local /models (no host cache mount)"
+
+          if [ -d "/models/${model_path}" ] && [ -f "/models/${model_path}/config.json" ]; then
+            MODEL_CACHE_HOST_ROOT="/models"
+            MODEL_CACHE_DESC="/models (pre-provisioned host path)"
+          elif [ -d "/data/models/${model_path}" ] && [ -f "/data/models/${model_path}/config.json" ]; then
+            MODEL_CACHE_HOST_ROOT="/data/models"
+            MODEL_CACHE_DESC="/data/models (pre-provisioned host path)"
+          elif [ -d "/models" ] && [ -w "/models" ]; then
+            MODEL_CACHE_HOST_ROOT="/models"
+            MODEL_CACHE_DESC="/models (writable host path)"
+          elif [ -d "/data/models" ] && [ -w "/data/models" ]; then
+            MODEL_CACHE_HOST_ROOT="/data/models"
+            MODEL_CACHE_DESC="/data/models (writable host path)"
+          fi
+
+          if [ -n "${MODEL_CACHE_HOST_ROOT}" ]; then
+            if mkdir -p "${MODEL_CACHE_HOST_ROOT}/${model_path}"; then
+              MODEL_CACHE_MOUNT="-v ${MODEL_CACHE_HOST_ROOT}:/models"
+              echo "Model cache host root: ${MODEL_CACHE_HOST_ROOT}"
+            else
+              MODEL_CACHE_HOST_ROOT=""
+              MODEL_CACHE_DESC="container-local /models (no writable host cache mount)"
+            fi
+          fi
+
+          if [ -z "${MODEL_CACHE_MOUNT}" ]; then
+            echo "No writable host model cache found; using container-local /models."
+          fi
+
+          echo "Using model cache backend: ${MODEL_CACHE_DESC}"
+          echo "MODEL_CACHE_MOUNT=${MODEL_CACHE_MOUNT}" >> "$GITHUB_ENV"
+          echo "MODEL_CACHE_DESC=${MODEL_CACHE_DESC}" >> "$GITHUB_ENV"
+
+      - name: Start OOT benchmark container
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          MODEL_MOUNT="${MODEL_CACHE_MOUNT}"
+          echo "Using model cache backend: ${MODEL_CACHE_DESC}"
+
+          cat > /tmp/oot_env_file.txt << 'EOF'
+          ${{ matrix.model.env_vars }}
+          EOF
+
+          docker run -dt --device=/dev/kfd $DEVICE_FLAG \
+            -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
+            $MODEL_MOUNT \
+            -w /workspace \
+            --ipc=host --group-add video \
+            --shm-size=16G \
+            --privileged \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --ulimit memlock=-1 \
+            --ulimit stack=67108864 \
+            --env-file /tmp/oot_env_file.txt \
+            -e HF_TOKEN="${HF_TOKEN:-}" \
+            --name "$CONTAINER_NAME" \
+            "${OOT_IMAGE_TAG}"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Download model if needed
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          model_dir="/models/${{ matrix.model.path }}"
+          if docker exec "$CONTAINER_NAME" bash -lc "[ -d \"$model_dir\" ] && [ -f \"$model_dir/config.json\" ]"; then
+            echo "Model already exists under ${model_dir}; skip download"
+          else
+            echo "Model not found under ${model_dir}; downloading model"
+            if ! docker exec -e HF_TOKEN="${HF_TOKEN:-}" "$CONTAINER_NAME" bash -lc "hf download ${{ matrix.model.path }} --local-dir \"$model_dir\""; then
+              echo "Model download failed for '${{ matrix.model.path }}'. Aborting."
+              exit 1
+            fi
+          fi
+
+      - name: Resolve OOT model path
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          if docker exec "$CONTAINER_NAME" bash -lc "[ -d \"/models/${{ matrix.model.path }}\" ] && [ -f \"/models/${{ matrix.model.path }}/config.json\" ]"; then
+            echo "OOT_RESOLVED_MODEL_PATH=/models/${{ matrix.model.path }}" >> "$GITHUB_ENV"
+            echo "Using pre-downloaded model path: /models/${{ matrix.model.path }}"
+          else
+            echo "OOT_RESOLVED_MODEL_PATH=${{ matrix.model.path }}" >> "$GITHUB_ENV"
+            echo "Using model id: ${{ matrix.model.path }}"
+          fi
+
+      - name: Prepare OOT benchmark runner
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          rm -rf .oot-benchmark/bench_serving
+          mkdir -p .oot-benchmark
+          git clone --depth 1 "${BENCH_SERVING_REPO_URL}" .oot-benchmark/bench_serving
+          test -f .oot-benchmark/bench_serving/benchmark_serving.py
+
+      - name: Run OOT benchmark
+        if: steps.check.outputs.enabled == 'true'
+        timeout-minutes: 120
+        env:
+          MAX_WAIT_RETRIES: "120"
+          STREAM_VLLM_LOGS: "1"
+        run: |
+          docker exec \
+            -e OOT_MODEL_NAME="${MODEL_NAME}" \
+            -e OOT_MODEL_PATH="${OOT_RESOLVED_MODEL_PATH:-$MODEL_PATH}" \
+            -e OOT_EXTRA_ARGS="${OOT_EXTRA_ARGS}" \
+            -e MAX_WAIT_RETRIES="${MAX_WAIT_RETRIES}" \
+            -e STREAM_VLLM_LOGS="${STREAM_VLLM_LOGS}" \
+            -e KEEP_SERVER_ALIVE_ON_EXIT=1 \
+            "$CONTAINER_NAME" bash -lc "
+              set -euo pipefail
+              bash .github/scripts/atom_oot_test.sh launch full
+            "
+
+          docker exec \
+            -e MODEL="${OOT_RESOLVED_MODEL_PATH:-$MODEL_PATH}" \
+            -e ISL="${ISL}" \
+            -e OSL="${OSL}" \
+            -e CONCURRENCY="${CONC}" \
+            -e RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO}" \
+            -e RESULT_FILENAME="${RESULT_FILENAME}" \
+            -e BENCH_EXTRA_ARGS="${BENCH_EXTRA_ARGS}" \
+            "$CONTAINER_NAME" bash -lc "
+              set -euo pipefail
+              python /workspace/.oot-benchmark/bench_serving/benchmark_serving.py \
+                --model=\"${MODEL}\" \
+                --backend=vllm \
+                --base-url=http://127.0.0.1:8000 \
+                --dataset-name=random \
+                --random-input-len=\"${ISL}\" \
+                --random-output-len=\"${OSL}\" \
+                --random-range-ratio \"${RANDOM_RANGE_RATIO}\" \
+                --num-prompts=\"$(( CONCURRENCY * 10 ))\" \
+                --max-concurrency=\"${CONCURRENCY}\" \
+                --request-rate=inf \
+                --ignore-eos \
+                --save-result \
+                --percentile-metrics=\"ttft,tpot,itl,e2el\" \
+                --result-dir=/workspace \
+                --result-filename=\"${RESULT_FILENAME}.json\" \
+                ${BENCH_EXTRA_ARGS:-}
+            "
+
+          RESULT_PATH="${RESULT_FILENAME}.json" EXTRA_ARGS_TEXT="${OOT_EXTRA_ARGS}" python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          result_path = os.environ["RESULT_PATH"]
+          with open(result_path, encoding="utf-8") as f:
+              data = json.load(f)
+
+          data["random_input_len"] = int(os.environ["ISL"])
+          data["random_output_len"] = int(os.environ["OSL"])
+          data["benchmark_backend"] = "OOT"
+
+          tp_match = re.search(
+              r"--tensor-parallel-size\s+(\d+)",
+              os.environ.get("EXTRA_ARGS_TEXT", ""),
+          )
+          if tp_match:
+              data["tensor_parallel_size"] = int(tp_match.group(1))
+
+          with open(result_path, "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Collect benchmark result
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          docker cp "$CONTAINER_NAME":/workspace/${RESULT_FILENAME}.json "./${RESULT_FILENAME}.json" || true
+          if [ ! -f "./${RESULT_FILENAME}.json" ]; then
+            echo "ERROR: Benchmark result file ${RESULT_FILENAME}.json was not generated."
+            exit 1
+          fi
+
+      - name: Upload benchmark result
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: oot-benchmark-${{ env.RESULT_FILENAME }}
+          path: ${{ env.RESULT_FILENAME }}.json
+
+      - name: Clean up OOT benchmark container
+        if: always() && steps.check.outputs.enabled == 'true'
+        run: |
+          docker exec "$CONTAINER_NAME" bash -lc "if [ -f /tmp/vllm_oot.pid ]; then kill \$(cat /tmp/vllm_oot.pid) || true; fi" || true
+          docker stop "$CONTAINER_NAME" || true
+          docker rm "$CONTAINER_NAME" || true
+
+  summarize-benchmark-result:
+    if: always()
+    name: Summarize OOT benchmark result
+    needs: [benchmark]
+    runs-on: ubuntu-latest
+    outputs:
+      has_regression: ${{ steps.check-regression.outputs.has_regression }}
+      has_results: ${{ steps.check-results.outputs.has_results }}
+    steps:
+      - name: Checkout ATOM repo
+        uses: actions/checkout@v6
+
+      - name: Download all benchmark results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: 'oot-benchmark-*'
+          merge-multiple: true
+          path: .
+        continue-on-error: true
+
+      - name: Check downloaded results
+        id: check-results
+        run: |
+          shopt -s nullglob
+          json_files=(*.json)
+          if [ "${#json_files[@]}" -gt 0 ]; then
+            echo "has_results=true" >> "$GITHUB_OUTPUT"
+            printf 'Downloaded %s benchmark result files\n' "${#json_files[@]}"
+          else
+            echo "has_results=false" >> "$GITHUB_OUTPUT"
+            echo "No benchmark result JSON files were downloaded."
+          fi
+
+      - name: Download baseline from previous nightly run
+        if: steps.check-results.outputs.has_results == 'true'
+        id: baseline
+        run: |
+          PREV_RUN_ID=$(gh run list \
+            --workflow="ATOM vLLM OOT Benchmark" \
+            --branch=main \
+            --event=schedule \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')
+
+          if [ -n "$PREV_RUN_ID" ] && [ "$PREV_RUN_ID" != "${{ github.run_id }}" ]; then
+            echo "Downloading baseline from run #$PREV_RUN_ID"
+            mkdir -p /tmp/baseline
+            gh run download "$PREV_RUN_ID" --dir /tmp/baseline || echo "::warning::Failed to download baseline artifacts"
+            echo "baseline_dir=/tmp/baseline" >> "$GITHUB_OUTPUT"
+          else
+            echo "No previous successful nightly run found"
+            echo "baseline_dir=" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Summarize benchmark result
+        if: steps.check-results.outputs.has_results == 'true'
+        id: check-regression
+        run: |
+          BASELINE_ARG=""
+          if [ -n "${{ steps.baseline.outputs.baseline_dir }}" ]; then
+            BASELINE_ARG="--baseline-dir ${{ steps.baseline.outputs.baseline_dir }}"
+          fi
+          .github/scripts/summarize.py . $BASELINE_ARG \
+            --output-json regression_report.json \
+            >> "$GITHUB_STEP_SUMMARY" || true
+
+          if [ -f regression_report.json ]; then
+            REG_COUNT=$(python3 -c "import json; print(json.load(open('regression_report.json'))['regression_count'])")
+            if [ "$REG_COUNT" -gt 0 ]; then
+              echo "has_regression=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_regression=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "has_regression=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload regression report
+        if: steps.check-results.outputs.has_results == 'true' && steps.check-regression.outputs.has_regression == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: oot-benchmark-regression-report
+          path: regression_report.json
+
+      - name: Transform results for benchmark dashboard
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          python3 .github/scripts/oot_benchmark_to_dashboard.py \
+            . \
+            --output benchmark-action-input.json \
+            --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Store benchmark result to dashboard
+        if: steps.check-results.outputs.has_results == 'true'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customBiggerIsBetter
+          output-file-path: benchmark-action-input.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: benchmark-dashboard
+          auto-push: false
+          alert-threshold: "80%"
+          comment-on-alert: true
+          fail-on-alert: false
+          max-items-in-chart: 90
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy custom dashboard to gh-pages
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          CURRENT_SHA=$(git rev-parse HEAD)
+          cp .github/dashboard/index.html /tmp/dashboard_index.html
+          cp docs/assets/atom_logo.png /tmp/dashboard_logo.png
+          git fetch origin gh-pages
+          git checkout gh-pages
+          cp /tmp/dashboard_index.html benchmark-dashboard/index.html
+          cp /tmp/dashboard_logo.png benchmark-dashboard/atom_logo.png
+          git add benchmark-dashboard/
+          git diff --cached --quiet || git commit -m "Update OOT benchmark data and dashboard"
+          git push origin gh-pages
+          git checkout "$CURRENT_SHA"
