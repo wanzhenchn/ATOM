@@ -9,7 +9,7 @@ from aiter.dist.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
-from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.models.interfaces import (
     SupportsPP,
@@ -28,6 +28,7 @@ from atom.model_loader.loader import load_model_in_plugin_mode
 import logging
 
 logger = logging.getLogger("atom")
+_ATOM_OOT_TORCH_PROFILE_ACTIVE = False
 
 
 _ATOM_MODEL_CLASSES: dict[str, str] = {
@@ -71,8 +72,29 @@ def _is_torch_profile_enabled(vllm_config: VllmConfig) -> bool:
 
 
 def _patch_vllm_profile_labels() -> None:
+    from vllm.profiler.wrapper import TorchProfilerWrapper
     from vllm.v1.worker import gpu_model_runner as gpu_model_runner_mod
     from vllm.v1 import utils as v1_utils_mod
+
+    global _ATOM_OOT_TORCH_PROFILE_ACTIVE
+
+    if not getattr(TorchProfilerWrapper, "_atom_step_label_patched", False):
+        original_call_start = TorchProfilerWrapper._call_start
+        original_call_stop = TorchProfilerWrapper._call_stop
+
+        def _wrapped_call_start(self):
+            global _ATOM_OOT_TORCH_PROFILE_ACTIVE
+            original_call_start(self)
+            _ATOM_OOT_TORCH_PROFILE_ACTIVE = bool(getattr(self, "_running", False))
+
+        def _wrapped_call_stop(self):
+            global _ATOM_OOT_TORCH_PROFILE_ACTIVE
+            original_call_stop(self)
+            _ATOM_OOT_TORCH_PROFILE_ACTIVE = False
+
+        TorchProfilerWrapper._call_start = _wrapped_call_start
+        TorchProfilerWrapper._call_stop = _wrapped_call_stop
+        TorchProfilerWrapper._atom_step_label_patched = True
 
     # Use vLLM's existing step boundary in execute_model():
     #
@@ -98,19 +120,12 @@ def _patch_vllm_profile_labels() -> None:
 
             def __enter__(self):
                 if self.name == "gpu_model_runner: forward":
-                    vllm_config = get_current_vllm_config_or_none()
-                    print('[zejun] vllm_config = ', vllm_config, flush=True)
-                    print('[zejun] _is_torch_profile_enabled(vllm_config) = ', _is_torch_profile_enabled(vllm_config), flush=True)
-                    print('[zejun] is_forward_context_available() = ', is_forward_context_available(), flush=True)
                     if (
-                        vllm_config is not None
-                        and _is_torch_profile_enabled(vllm_config)
+                        _ATOM_OOT_TORCH_PROFILE_ACTIVE
                         and is_forward_context_available()
                     ):
                         record_label = _build_step_profiler_label()
-                        print('[zejun] record_label = ', record_label, flush=True)
                         if record_label is not None:
-                            print('[zejun] record_label = ', record_label, flush=True)
                             self.ctx = record_function(record_label)
                             return self.ctx.__enter__()
 
