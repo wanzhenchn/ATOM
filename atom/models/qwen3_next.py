@@ -537,6 +537,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             input_size=self.conv_kernel_size,
             output_size=self.conv_dim,
             bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.conv1d",
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
