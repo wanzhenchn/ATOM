@@ -583,6 +583,7 @@ class Config:
     enable_dp_attention: bool = False
     torch_dtype: torch.dtype = field(init=False)
     speculative_config: Optional[SpeculativeConfig] = None
+    runner_qualname: str = "atom.model_engine.model_runner.ModelRunner"
 
     def _set_cudagraph_sizes(self):
         if self.compilation_config.cudagraph_capture_sizes:
