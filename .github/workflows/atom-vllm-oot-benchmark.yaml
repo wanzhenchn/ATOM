@@ -5,6 +5,12 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 on:
+  # Temporary PR validation hook: remove this block after the workflow has been
+  # verified end-to-end and the benchmark should go back to default-branch-only
+  # triggering via schedule/workflow_dispatch.
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     # Nightly at 02:00 Beijing time (18:00 UTC)
     - cron: '0 18 * * *'
@@ -210,7 +216,11 @@ jobs:
       - name: Check if model is enabled
         id: check
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          # Temporary PR validation behavior: enable all models automatically so
+          # PR runs do not depend on workflow_dispatch inputs. Remove
+          # "pull_request" from this condition when reverting to default-branch
+          # manual/nightly triggering only.
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             case "${{ matrix.model.prefix }}" in
@@ -560,13 +570,37 @@ jobs:
           benchmark-data-dir-path: benchmark-dashboard
           auto-push: false
           alert-threshold: "80%"
-          comment-on-alert: true
+          # PR validation should not comment on alerts because the branch is not
+          # yet the source of truth for the public dashboard.
+          comment-on-alert: ${{ github.event_name != 'pull_request' }}
           fail-on-alert: false
           max-items-in-chart: 90
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Temporary PR validation artifact: lets us inspect the generated
+      # benchmark-dashboard payload before merge without updating gh-pages.
+      - name: Prepare dashboard preview artifact
+        if: steps.check-results.outputs.has_results == 'true' && github.event_name == 'pull_request'
+        run: |
+          rm -rf dashboard-preview
+          mkdir -p dashboard-preview/benchmark-dashboard
+          cp -R benchmark-dashboard/. dashboard-preview/benchmark-dashboard/
+          cp .github/dashboard/index.html dashboard-preview/benchmark-dashboard/index.html
+          cp docs/assets/atom_logo.png dashboard-preview/benchmark-dashboard/atom_logo.png
+          cp benchmark-action-input.json dashboard-preview/benchmark-dashboard/benchmark-action-input.json
+
+      - name: Upload dashboard preview artifact
+        if: steps.check-results.outputs.has_results == 'true' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: oot-dashboard-preview-${{ github.run_id }}
+          path: dashboard-preview/
+
+      # Keep gh-pages deployment disabled for PR validation. After verification,
+      # this job can revert to the original default-branch-only flow by removing
+      # the pull_request trigger and the PR-only preview artifact steps above.
       - name: Deploy custom dashboard to gh-pages
-        if: steps.check-results.outputs.has_results == 'true'
+        if: steps.check-results.outputs.has_results == 'true' && github.event_name != 'pull_request'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
