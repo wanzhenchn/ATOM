@@ -60,7 +60,7 @@ def fused_split_chunk_kernel(
         tl.store(z_ptr + z_out_base + dim_idx, z_vals, mask=mask)
 
         # Store zeros to core_attn_out: coalesced write
-        zeros = tl.zeros([BLOCK_SIZE], dtype=tl.float16)
+        zeros = tl.zeros([BLOCK_SIZE], dtype=z_vals.dtype)
         tl.store(core_attn_out_ptr + z_out_base + dim_idx, zeros, mask=mask)
 
     elif work_id == num_v_heads_tp:
