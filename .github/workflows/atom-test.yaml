@@ -106,7 +106,7 @@ jobs:
           retention-days: 1
 
   atom:
-    needs: [pre-checks, download_aiter_wheel]
+    needs: [download_aiter_wheel]
     name: ATOM Test
     strategy:
       fail-fast: false
