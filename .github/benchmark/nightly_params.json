@@ -1,0 +1,21 @@
+{
+  "description": "Nightly benchmark parameter sets, aligned with InferenceX dsr1-fp8 config",
+  "default_random_range_ratio": 0.8,
+  "param_sets": [
+    {
+      "input_length": 1024,
+      "output_length": 1024,
+      "concurrency": [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    },
+    {
+      "input_length": 1024,
+      "output_length": 8192,
+      "concurrency": [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    },
+    {
+      "input_length": 8192,
+      "output_length": 1024,
+      "concurrency": [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    }
+  ]
+}
