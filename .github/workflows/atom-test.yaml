@@ -26,11 +26,22 @@ env:
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
 
 jobs:
-  pre-checks:
-    uses: ./.github/workflows/pre-checks.yaml
-    with:
-      black: true
-      ruff: true
+  check-signal:
+    if: ${{ !github.event.pull_request || github.event.pull_request.draft == false }}
+    name: Check Pre Checkin Signal
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout ATOM repo
+        uses: actions/checkout@v6
+
+      - name: Download and check pre-checkin signal
+        run: bash ./.github/scripts/check_signal.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
 
   download_aiter_wheel:
     if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
@@ -181,7 +192,7 @@ jobs:
             accuracy_test_threshold: "0.65"
             runner: atom-mi355-8gpu.predownload
             run_on_pr: true
-    if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
+    if: ${{ !github.event.pull_request || github.event.pull_request.draft == false }}
     runs-on: ${{ matrix.runner }}
 
     env:
