@@ -44,7 +44,7 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
 
   download_aiter_wheel:
-    if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
+    if: ${{ needs.check-signal.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
     needs: [check-signal]
     name: Download aiter wheel
     runs-on: ubuntu-latest
