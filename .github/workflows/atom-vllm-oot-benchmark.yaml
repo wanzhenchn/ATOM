@@ -389,7 +389,6 @@ jobs:
             "
 
           docker exec \
-            -e MODEL="${OOT_RESOLVED_MODEL_PATH:-$MODEL_PATH}" \
             -e ISL="${ISL}" \
             -e OSL="${OSL}" \
             -e RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO}" \
@@ -398,7 +397,7 @@ jobs:
             "$CONTAINER_NAME" bash -lc "
               set -euo pipefail
               python /workspace/.oot-benchmark/bench_serving/benchmark_serving.py \
-                --model=\"${MODEL}\" \
+                --model=\"${OOT_RESOLVED_MODEL_PATH:-$MODEL_PATH}\" \
                 --backend=vllm \
                 --base-url=http://127.0.0.1:8000 \
                 --dataset-name=random \
@@ -407,6 +406,8 @@ jobs:
                 --random-range-ratio \"${RANDOM_RANGE_RATIO}\" \
                 --num-prompts=\"$(( CONC * 10 ))\" \
                 --max-concurrency=\"${CONC}\" \
+                --trust-remote-code \
+                --num-warmups=1 \
                 --request-rate=inf \
                 --ignore-eos \
                 --save-result \
