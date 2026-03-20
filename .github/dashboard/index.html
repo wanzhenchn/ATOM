@@ -867,7 +867,7 @@ function renderPerformanceTab() {
 
   // --- Table ---
   html += `<div class="table-watermark"><table class="perf-table"><thead><tr>
-    <th>Model</th><th>ISL/OSL</th><th class="num">Conc</th><th class="num">TP</th>
+    <th>Backend</th><th>Model</th><th>ISL/OSL</th><th class="num">Conc</th><th class="num">TP</th>
     <th class="num">Total Tput (tok/s)</th><th class="num">Output Tput (tok/s)</th>
     <th class="num">Interac.</th>
     <th class="num">TPOT (ms)</th><th class="num">TTFT (ms)</th>
@@ -1033,7 +1033,7 @@ function renderTradeoffTab() {
   const seriesMap = {};
   for (const [key, cfg] of entries) {
     const sKey = `${cfg.backend} · ${cfg.model} ${cfg.islOsl}`;
-    if (!seriesMap[sKey]) seriesMap[sKey] = { backend: cfg.backend, model: cfg.model, points: [], concLabels: [], configKeys: [] };
+    if (!seriesMap[sKey]) seriesMap[sKey] = { backend: cfg.backend, model: cfg.model, islOsl: cfg.islOsl, points: [], concLabels: [], configKeys: [] };
     const tpot = cfg.TPOT;
     const totalTput = cfg['Total Tput'];
     const gpuCount = cfg._gpu_count || 8;
@@ -1079,9 +1079,9 @@ function renderTradeoffTab() {
     for (const [sKey, s] of Object.entries(seriesMap)) {
       if (!famModels.includes(s.model) || s.points.length === 0) continue;
       const indices = s.points.map((_, i) => i).sort((a, b) => s.points[a].x - s.points[b].x);
-      const color = getModelColor(s.model);
+      const color = getModelColor(s.backend, s.model);
       heroDS.push({
-        label: modelVariant(s.model) + ' ' + fmtIslOsl(sKey.split(' ').slice(1).join(' ')), data: indices.map(i => s.points[i]),
+        label: `${s.backend} · ${modelVariant(s.model)} ${fmtIslOsl(s.islOsl)}`, data: indices.map(i => s.points[i]),
         borderColor: color.border, backgroundColor: color.bg,
         borderWidth: 2, pointRadius: 5, pointHoverRadius: 7, showLine: true, fill: false,
         _concLabels: indices.map(i => s.concLabels[i]), _configKeys: indices.map(i => s.configKeys[i])
@@ -1181,8 +1181,8 @@ function buildConcurrencyScaling(canvasId, configs, familyName, famModels) {
   if (!famModels) famModels = [familyName];
   const byKey = {}; // key: "model|islOsl"
   for (const [key, cfg] of Object.entries(configs)) {
-    const sKey = `${cfg.model}|${cfg.islOsl}`;
-    if (!byKey[sKey]) byKey[sKey] = { model: cfg.model, islOsl: cfg.islOsl, tputPoints: [], tpotPoints: [], tputKeys: [], tpotKeys: [] };
+    const sKey = `${cfg.backend}|${cfg.model}|${cfg.islOsl}`;
+    if (!byKey[sKey]) byKey[sKey] = { backend: cfg.backend, model: cfg.model, islOsl: cfg.islOsl, tputPoints: [], tpotPoints: [], tputKeys: [], tpotKeys: [] };
     if (cfg.throughput != null) { byKey[sKey].tputPoints.push({ x: cfg.conc, y: cfg.throughput }); byKey[sKey].tputKeys.push(key); }
     if (cfg.TPOT != null) { byKey[sKey].tpotPoints.push({ x: cfg.conc, y: cfg.TPOT }); byKey[sKey].tpotKeys.push(key); }
   }
@@ -1194,8 +1194,11 @@ function buildConcurrencyScaling(canvasId, configs, familyName, famModels) {
   for (let i = 0; i < seriesKeys.length; i++) {
     const s = byKey[seriesKeys[i]];
     const dash = dashPatterns[i % dashPatterns.length];
-    const h = getModelHue(s.model);
-    const variantLabel = famModels.length > 1 ? `${modelVariant(s.model)} ${fmtIslOsl(s.islOsl)}` : fmtIslOsl(s.islOsl);
+    const h = getModelHue(s.backend, s.model);
+    const variantBits = [s.backend];
+    if (famModels.length > 1) variantBits.push(modelVariant(s.model));
+    variantBits.push(fmtIslOsl(s.islOsl));
+    const variantLabel = variantBits.join(' ');
     // Throughput: use model color
     if (s.tputPoints.length) {
       const sorted = s.tputPoints.map((_, j) => j).sort((a, b) => s.tputPoints[a].x - s.tputPoints[b].x);
@@ -1355,13 +1358,10 @@ function renderTrendsTab() {
       if (!key.startsWith(state.trendModelKey + '|')) continue;
       const parts = key.split('|');
       // Respect global ISL/OSL and Concurrency filters
-      if (!state.filters.islOsl.includes(parts[1])) continue;
-      if (!state.filters.conc.includes(+parts[2])) continue;
-      const seriesLabel = fmtIslOsl(parts[1]) + ' c=' + parts[2];
-      const color = getModelColor(state.trendModel);
-      // Use hue variation for different configs of same model
-      const hueShift = (parseInt(parts[2]) * 37) % 60 - 30;
-      const baseHue = parseInt(color.border.match(/\d+/)?.[0] || '200');
+      if (!state.filters.islOsl.includes(parts[2])) continue;
+      if (!state.filters.conc.includes(+parts[3])) continue;
+      const seriesLabel = fmtIslOsl(parts[2]) + ' c=' + parts[3];
+      const color = getModelColor(trendBackend, trendModel);
 
       const pointMap = {};
       for (const pt of history) {
@@ -1506,7 +1506,7 @@ function renderDataTab() {
 
 function renderDataTable() {
   let html = `<div class="table-watermark"><table class="perf-table"><thead><tr>
-    <th>Date</th><th>Commit</th><th>Model</th><th>ISL/OSL</th><th class="num">Conc</th><th class="num">TP</th>
+    <th>Date</th><th>Commit</th><th>Backend</th><th>Model</th><th>ISL/OSL</th><th class="num">Conc</th><th class="num">TP</th>
     <th class="num">Throughput (tok/s)</th><th class="num">TPOT (ms)</th><th class="num">TTFT (ms)</th><th>Run</th>
   </tr></thead><tbody>`;
 
@@ -1522,7 +1522,8 @@ function renderDataTable() {
       html += `<tr data-key="data-${key}-${run.date}">
         <td>${fmtDate(cfg.date)}</td>
         <td><a href="${cfg.commit.url || '#'}" target="_blank">${commitId}</a></td>
-        <td class="model-name" style="color:${getModelColor(cfg.model).text}">${cfg.model}</td>
+        <td>${cfg.backend}</td>
+        <td class="model-name" style="color:${getModelColor(cfg.backend, cfg.model).text}">${cfg.model}</td>
         <td>${fmtIslOsl(cfg.islOsl)}</td>
         <td class="num">${cfg.conc}</td>
         <td class="num">${cfg._gpu_count || '—'}</td>
@@ -1575,7 +1576,7 @@ function renderTimeline() {
         </tr></thead><tbody>`;
     for (const [, cfg] of entries) {
       html += `<tr>
-        <td class="model-name" style="color:${getModelColor(cfg.model).text}">${cfg.model}</td><td>${fmtIslOsl(cfg.islOsl)}</td><td class="num">${cfg.conc}</td><td class="num">${cfg._gpu_count || '—'}</td>
+        <td>${cfg.backend}</td><td class="model-name" style="color:${getModelColor(cfg.backend, cfg.model).text}">${cfg.model}</td><td>${fmtIslOsl(cfg.islOsl)}</td><td class="num">${cfg.conc}</td><td class="num">${cfg._gpu_count || '—'}</td>
         <td class="num">${cfg.throughput != null ? fmtNum(cfg.throughput, 1) : '—'}</td>
         <td class="num">${cfg.TPOT != null ? fmtNum(cfg.TPOT, 2) : '—'}</td>
         <td class="num">${cfg.TTFT != null ? fmtNum(cfg.TTFT, 1) : '—'}</td>

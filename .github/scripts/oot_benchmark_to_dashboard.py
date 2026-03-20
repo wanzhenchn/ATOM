@@ -8,7 +8,6 @@ import json
 import re
 from pathlib import Path
 
-
 VARIANT_RE = re.compile(r"-(mtp\d*)-")
 DEFAULT_BACKEND = "OOT"
 
@@ -119,7 +118,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert OOT benchmark JSON files to github-action-benchmark input"
     )
-    parser.add_argument("result_dir", help="Directory containing OOT benchmark JSON files")
+    parser.add_argument(
+        "result_dir", help="Directory containing OOT benchmark JSON files"
+    )
     parser.add_argument("--output", required=True, help="Output JSON path")
     parser.add_argument(
         "--run-url",

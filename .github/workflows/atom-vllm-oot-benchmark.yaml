@@ -392,7 +392,6 @@ jobs:
             -e MODEL="${OOT_RESOLVED_MODEL_PATH:-$MODEL_PATH}" \
             -e ISL="${ISL}" \
             -e OSL="${OSL}" \
-            -e CONCURRENCY="${CONC}" \
             -e RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO}" \
             -e RESULT_FILENAME="${RESULT_FILENAME}" \
             -e BENCH_EXTRA_ARGS="${BENCH_EXTRA_ARGS}" \
@@ -406,8 +405,8 @@ jobs:
                 --random-input-len=\"${ISL}\" \
                 --random-output-len=\"${OSL}\" \
                 --random-range-ratio \"${RANDOM_RANGE_RATIO}\" \
-                --num-prompts=\"$(( CONCURRENCY * 10 ))\" \
-                --max-concurrency=\"${CONCURRENCY}\" \
+                --num-prompts=\"$(( CONC * 10 ))\" \
+                --max-concurrency=\"${CONC}\" \
                 --request-rate=inf \
                 --ignore-eos \
                 --save-result \
