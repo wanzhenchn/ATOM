@@ -10,8 +10,8 @@ as an out-of-tree (OOT) backend.
 >
 > | Component | Import / Entry Point | Purpose |
 > |-----------|---------------------|---------|
-> | `register_platform` | `atom.plugin.vllm.register:register_platform` | vLLM platform plugin — returns `ATOMPlatform` |
-> | `register_model` | `atom.plugin.vllm.register:register_model` | vLLM general plugin — overrides model registry |
+> | `register_platform` | `atom.plugin.vllm.register:register_platform` | vLLM platform plugin entry point — sets ATOM framework state and returns `ATOMPlatform` to control attention backend selection |
+> | `register_model` | `atom.plugin.vllm.register:register_model` | vLLM general plugin entry point — overrides model registry with ATOM wrappers, patches MLA attention, and fixes `act_dtype` defaults |
 > | `ATOMPlatform` | `atom.plugin.vllm.platform.ATOMPlatform` | ROCm platform subclass that selects ATOM attention backends |
 > | `ATOMModelBase` | `atom.plugin.vllm.model_wrapper.ATOMModelBase` | Base wrapper adapting ATOM models to vLLM's `VllmModel` interface |
 > | `PluginConfig` | `atom.plugin.config.PluginConfig` | Dataclass carrying plugin-specific configuration |
@@ -132,26 +132,76 @@ export ATOM_DISABLE_VLLM_PLUGIN_ATTENTION=1
 
 ### 4.1 Plugin Discovery
 
-ATOM registers two entry points in `pyproject.toml`:
+ATOM registers two entry points in
+[`pyproject.toml`](https://github.com/ROCm/ATOM/blob/main/pyproject.toml#L29-L39)
+under the `vllm.platform_plugins` and `vllm.general_plugins` groups. These are
+the **sole entry points** through which vLLM discovers and activates the ATOM
+OOT plugin — all subsequent ATOM behavior (custom platform, model overrides,
+attention backends, MoE kernels) flows from these two registrations:
 
 ```toml
 [project.entry-points."vllm.platform_plugins"]
+# Installed by default; disable at runtime with ATOM_DISABLE_VLLM_PLUGIN=1
 atom = "atom.plugin.vllm.register:register_platform"
 
 [project.entry-points."vllm.general_plugins"]
+# Installed by default; disable at runtime with ATOM_DISABLE_VLLM_PLUGIN=1
 atom_model_registry = "atom.plugin.vllm.register:register_model"
 ```
 
 vLLM calls these at startup:
 
-1. **`register_platform()`** — sets `_CURRENT_FRAMEWORK = "vllm"` and returns
-   the string `"atom.plugin.vllm.platform.ATOMPlatform"`. vLLM uses this class
-   as the active platform, which controls attention backend selection.
+#### `register_platform()`
 
-2. **`register_model()`** — iterates over `_VLLM_MODEL_REGISTRY_OVERRIDES` and
-   calls `vllm.ModelRegistry.register_model()` for each supported architecture,
-   pointing them to ATOM wrapper classes. It also patches vLLM's `Attention` and
-   `MLAAttention` classes for compatibility.
+This is the **platform plugin entry point**. vLLM invokes it during platform
+resolution to determine which hardware platform class to use.
+
+- **When disabled** (`ATOM_DISABLE_VLLM_PLUGIN=1`): returns `None`, causing
+  vLLM to fall back to its built-in `RocmPlatform` with no ATOM involvement.
+- **When enabled** (default): calls `_set_framework_backbone("vllm")` to set
+  ATOM's internal framework state to vLLM plugin mode, then returns the
+  fully-qualified class name `"atom.plugin.vllm.platform.ATOMPlatform"`. vLLM
+  imports this class and installs it as the active platform.
+
+`ATOMPlatform` is a subclass of vLLM's `RocmPlatform`. Its primary
+responsibility is overriding `get_attn_backend_cls()` to route attention
+dispatch to ATOM's optimized backends (`AiterBackend` for MHA,
+`AiterMLABackend` for MLA) instead of vLLM's default ROCm attention. See
+[Section 6](#6-attention-integration) for details.
+
+#### `register_model()`
+
+This is the **general plugin entry point**. vLLM invokes it after platform
+setup to allow plugins to perform additional initialization.
+
+`register_model()` performs three tasks:
+
+1. **Model registry override** — iterates over `_VLLM_MODEL_REGISTRY_OVERRIDES`
+   (a mapping from HuggingFace architecture names to ATOM wrapper classes) and
+   calls `vllm.ModelRegistry.register_model()` for each entry. This redirects
+   vLLM's model construction so that when a user loads, e.g.,
+   `DeepseekV3ForCausalLM`, vLLM instantiates ATOM's `ATOMMoEForCausalLM`
+   wrapper instead of its built-in implementation. After updating the registry,
+   it clears vLLM's model-loading LRU caches to ensure the overrides take
+   effect immediately. The currently registered overrides are:
+
+   | HuggingFace Architecture | ATOM Wrapper |
+   |---|---|
+   | `Qwen3ForCausalLM` | `ATOMForCausalLM` (dense) |
+   | `Qwen3MoeForCausalLM` | `ATOMMoEForCausalLM` (MoE) |
+   | `DeepseekV3ForCausalLM` | `ATOMMoEForCausalLM` (MoE) |
+   | `GptOssForCausalLM` | `ATOMMoEForCausalLM` (MoE) |
+   | `Glm4MoeForCausalLM` | `ATOMMoEForCausalLM` (MoE) |
+
+2. **MLA attention patch** — calls `patch_vllm_mla_attention()` to patch vLLM's
+   `MLAAttention` class so that its `process_weights_after_loading` and
+   `forward_impl` methods are compatible with ATOM's MLA backend.
+
+3. **Attention `process_weights_after_loading` patch** — patches both
+   `vllm.Attention` and `vllm.MLAAttention` to supply a default `act_dtype`
+   parameter (`torch.bfloat16`) to `process_weights_after_loading()`. This
+   avoids a missing-argument error when ATOM's weight loader calls the method
+   without explicitly passing `act_dtype`.
 
 ### 4.2 Plugin Lifecycle
 
