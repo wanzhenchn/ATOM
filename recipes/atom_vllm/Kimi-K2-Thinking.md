@@ -3,30 +3,20 @@
 This recipe shows how to run `Kimi-K2-Thinking` with the ATOM vLLM out-of-tree platform. For background on the OOT backend, see [vLLM OOT Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 This model uses remote code, so the launch command keeps `--trust-remote-code`.
-
-## Step 1: Pull the OOT Docker
+## Step 1: Pull the ATOM vLLM Docker
+ATOM will release the docker nightly. Users can refer to https://hub.docker.com/r/rocm/atom/ to check the docker. We suggest using the newest docker to get the latest feature and performance.
 
 ```bash
 docker pull rocm/atom-dev:vllm-latest
 ```
 
-## Step 2: Download the Model if Needed
+
+## Step 2: Launch vLLM Server
+
+The ATOM vLLM plugin backend keeps the standard vLLM CLI, server APIs, and general usage flow compatible with upstream vLLM. For general server options and API usage, refer to the [official vLLM documentation](https://docs.vllm.ai/en/latest/).
 
 ```bash
-model_id=amd/Kimi-K2-Thinking-MXFP4
-model_path=/data/models/Kimi-K2-Thinking-MXFP4
-
-hf download ${model_id} --local-dir ${model_path}
-```
-
-## Step 3: Launch vLLM Server
-
-The vLLM OOT plugin backend keeps the standard vLLM CLI, server APIs, and general usage flow compatible with upstream vLLM. For general server options and API usage, refer to the [official vLLM documentation](https://docs.vllm.ai/en/latest/).
-
-```bash
-model_path=/data/models/Kimi-K2-Thinking-MXFP4
-
-vllm serve $model_path \
+vllm serve amd/Kimi-K2-Thinking-MXFP4 \
     --host localhost \
     --port 8000 \
     --trust-remote-code \
@@ -35,32 +25,31 @@ vllm serve $model_path \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
-    --no-enable-prefix-caching \
-    2>&1 | tee log.serve.log &
+    --no-enable-prefix-caching
 ```
 
-### Optional: Enable Profiling
-If you want to collect profiles, add `--profiler-config "$profiler_config"` to the `vllm serve` command above.
-
+## Step 3: Performance Benchmark
+Users can use the default vllm bench command for performance benchmarking.
 ```bash
-profiler_dir=./
-
-profiler_config=$(printf '{"profiler":"torch","torch_profiler_dir":"%s","torch_profiler_with_stack":true,"torch_profiler_record_shapes":true}' \
-    "${profiler_dir}")
+vllm bench serve \
+    --host localhost \
+    --port 8000 \
+    --model amd/Kimi-K2-Thinking-MXFP4 \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --random-range-ratio 0.8 \
+    --max-concurrency 64 \
+    --num-prompts 640 \
+    --trust_remote_code \
+    --percentile-metrics ttft,tpot,itl,e2el
 ```
 
-## Step 4: Validate Accuracy With lm_eval
+## Step 4: Accuracy Validation
 
 ```bash
-addr=localhost
-port=8000
-url=http://${addr}:${port}/v1/completions
-model=/data/models/Kimi-K2-Thinking-MXFP4
-task=gsm8k
-
 lm_eval --model local-completions \
-        --model_args model=${model},base_url=${url},num_concurrent=16,max_retries=3,tokenized_requests=False \
-        --tasks ${task} \
-        --num_fewshot 3 \
-        2>&1 | tee log.lmeval.log
+        --model_args model=amd/Kimi-K2-Thinking-MXFP4,base_url=http://localhost:8000/v1/completions,num_concurrent=16,max_retries=3,tokenized_requests=False \
+        --tasks gsm8k \
+        --num_fewshot 3
 ```
