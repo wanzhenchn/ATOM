@@ -1,6 +1,6 @@
-# GLM-4-MoE with ATOM vLLM OOT Platform
+# GLM-4-MoE with ATOM vLLM Plugin Backend
 
-This recipe shows how to run a `GLM-4-MoE` checkpoint with the ATOM vLLM out-of-tree platform. For background on the OOT backend, see [ATOM vLLM Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
+This recipe shows how to run a `GLM-4-MoE` model with the ATOM vLLM plugin backend. For background on the plugin backend, see [ATOM vLLM Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
 The checkpoint used here should expose the `Glm4MoeForCausalLM` architecture so it can be picked up by the ATOM OOT model override.
 
@@ -19,7 +19,6 @@ vllm serve zai-org/GLM-4.7-FP8 \
     --host localhost \
     --port 8000 \
     --tensor-parallel-size 8 \
-    --enable-expert-parallel \
     --kv-cache-dtype fp8 \
     --gpu_memory_utilization 0.9 \
     --async-scheduling \

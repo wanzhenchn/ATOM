@@ -1,4 +1,4 @@
-# DeepSeek-R1 with ATOM vLLM OOT Platform
+# DeepSeek-R1 with ATOM vLLM Plugin Backend
 
 This recipe shows how to run `deepseek-ai/DeepSeek-R1-0528` or `amd/DeepSeek-R1-0528-MXFP4` with the ATOM vLLM plugin backend. For background on the plugin backend, see [ATOM vLLM Plugin Backend](../../docs/vllm_plugin_backend_guide.md).
 
@@ -10,9 +10,10 @@ docker pull rocm/atom-dev:vllm-latest
 
 ## Step 2: Launch vLLM Server
 
-The vLLM OOT plugin backend keeps the standard vLLM CLI, server APIs, and general usage flow compatible with upstream vLLM. For general server options and API usage, refer to the [official vLLM documentation](https://docs.vllm.ai/en/latest/).
+The ATOM vLLM plugin backend keeps the standard vLLM CLI, server APIs, and general usage flow compatible with upstream vLLM. For general server options and API usage, users can refer to the [official vLLM documentation](https://docs.vllm.ai/en/latest/).
 
-### FP8
+### Deepseek with FP8
+Users can use this command to launch server on AMD Instinct MI308X, MI300X and MI325 platforms.
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-0528 \
@@ -26,8 +27,9 @@ vllm serve deepseek-ai/DeepSeek-R1-0528 \
     --no-enable-prefix-caching 
 ```
 
-### MXFP4
-For FP4, we suggest using the model weight quantized from AMD Quark.
+### Deepseek with MXFP4
+AMD Instinct MI355X GPU support MXFP4 computation instruction and users can use the following command to launch server on MI355X platform. For MXFP4 model weight, we suggest using the model weight quantized from AMD Quark.
+
 ```bash
 vllm serve amd/DeepSeek-R1-0528-MXFP4 \
     --host localhost \
