@@ -448,6 +448,7 @@ class Qwen3NextAttention(nn.Module):
         positions: torch.Tensor,
         output: torch.Tensor,
         hidden_states: torch.Tensor,
+        **model_kwargs,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
 
@@ -474,7 +475,7 @@ class Qwen3NextAttention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, positions=positions, **model_kwargs)
 
         if self.attn_output_gate:
             gate = torch.sigmoid(gate)
@@ -887,6 +888,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        **model_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
 
@@ -907,6 +909,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 output=self_attention_output,
                 positions=positions,
+                **model_kwargs,
             )
         else:
             raise ValueError("Invalid layer_type")
@@ -992,28 +995,46 @@ class Qwen3NextModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
+        from contextlib import nullcontext
+
+        bridge_ctx = nullcontext()
+        fb = model_kwargs.get("forward_batch")
+        if fb is not None:
+            from atom.plugin.prepare import is_plugin_mode, is_sglang
+
+            if is_plugin_mode() and is_sglang():
+                from atom.plugin.sglang.oot.utils.gdn_forward_helper import (
+                    sglang_gdn_forward_context,
+                )
+
+                bridge_ctx = sglang_gdn_forward_context(fb)
+
+        with bridge_ctx:
+            if get_pp_group().is_first_rank:
+                if inputs_embeds is not None:
+                    hidden_states = inputs_embeds
+                else:
+                    hidden_states = self.get_input_embeddings(input_ids)
+                residual = None
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+                assert intermediate_tensors is not None
+                hidden_states = intermediate_tensors["hidden_states"]
+                residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, **model_kwargs
+                )
 
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
-        hidden_states, _ = self.norm(hidden_states, residual)
+            if not get_pp_group().is_last_rank:
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            hidden_states, _ = self.norm(hidden_states, residual)
 
-        return hidden_states
+            return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -1052,6 +1073,7 @@ class Qwen3NextForCausalLM(nn.Module):
         super().__init__()
         config = atom_config.hf_config
         quant_config = atom_config.quant_config
+        self.atom_config = atom_config
         self.config = config
         self.quant_config = quant_config
         # Only perform the following mapping when Qwen3NextMLP exists
@@ -1084,9 +1106,17 @@ class Qwen3NextForCausalLM(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # SGLang OOT / cuda-graph capture passes forward_batch, get_embedding,
+        # pp_proxy_tensors, etc. RadixAttention (full_attention layers) requires
+        # forward_batch; thread kwargs through Qwen3NextModel -> DecoderLayer.
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            **kwargs,
         )
         return hidden_states
 
