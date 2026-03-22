@@ -20,6 +20,25 @@ from atom.utils.forward_context import ForwardContext, get_forward_context
 from torch import nn
 from aiter.dist.parallel_state import get_tp_group
 
+# Reused conv workspace for SGLang row-major mamba buffers (stable shape per server / cudagraph).
+_sglang_conv_work_cache: dict[tuple, torch.Tensor] = {}
+
+
+def _sglang_conv_work_tensor(raw: torch.Tensor) -> torch.Tensor:
+    key = (raw.shape, raw.dtype, raw.device)
+    n, d, w = raw.shape
+    need_stride = (d * w, 1, d)
+    t = _sglang_conv_work_cache.get(key)
+    if t is None or t.shape != raw.shape or t.stride() != need_stride:
+        t = torch.empty_strided(
+            (n, d, w),
+            need_stride,
+            dtype=raw.dtype,
+            device=raw.device,
+        )
+        _sglang_conv_work_cache[key] = t
+    return t
+
 
 @triton.jit
 def fused_gdn_gating_kernel(
@@ -157,14 +176,32 @@ class GatedDeltaNet(nn.Module):
         from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
 
         fwd_ctx: ForwardContext = get_forward_context()
-        gdn_metadata: GDNAttentionMetadata = fwd_ctx.attn_metadata.gdn_metadata
+        am = fwd_ctx.attn_metadata
+        # Default ForwardContext uses attn_metadata={}; vLLM path uses AttentionMetaData
+        # with a dynamically attached .gdn_metadata. SGLang OOT does not call
+        # set_forward_context yet, so am is often a dict — never use .gdn_metadata on it.
+        if isinstance(am, dict):
+            gdn_metadata = None
+        else:
+            gdn_metadata = getattr(am, "gdn_metadata", None)
 
         if gdn_metadata is None:
             return core_attn_out
 
         gdn_cache = fwd_ctx.kv_cache_data
-        conv_state = gdn_cache[f"layer_{self.layer_num}"].k_cache
-        ssm_state = gdn_cache[f"layer_{self.layer_num}"].v_cache
+        kv_entry = gdn_cache[f"layer_{self.layer_num}"]
+        raw_k = kv_entry.k_cache
+        ssm_state = kv_entry.v_cache
+        conv_layout = getattr(kv_entry, "mamba_conv_layout", "atom")
+        conv_sglang_copy_dst = None
+
+        if conv_layout == "sglang_rowmajor":
+            # SGLang: [slot, conv_dim, kernel-1] row-major; kernel needs stride(-2)==1 on [slot,D,W].
+            conv_state = _sglang_conv_work_tensor(raw_k)
+            conv_state.copy_(raw_k)
+            conv_sglang_copy_dst = raw_k
+        else:
+            conv_state = raw_k.transpose(-1, -2)
 
         has_initial_state = gdn_metadata.has_initial_state
         spec_query_start_loc = gdn_metadata.spec_query_start_loc
@@ -176,8 +213,6 @@ class GatedDeltaNet(nn.Module):
         non_spec_state_indices_tensor = (
             gdn_metadata.non_spec_state_indices_tensor
         )  # noqa: E501
-
-        conv_state = conv_state.transpose(-1, -2)
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         num_accepted_tokens = gdn_metadata.num_accepted_tokens
@@ -365,5 +400,8 @@ class GatedDeltaNet(nn.Module):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
+        if conv_sglang_copy_dst is not None:
+            conv_sglang_copy_dst.copy_(conv_state)
 
         return core_attn_out
