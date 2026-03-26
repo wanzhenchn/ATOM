@@ -337,49 +337,51 @@ def load_model(
                     maybe_matching_name,
                     f"mlp.experts.{hf_config.n_routed_experts}.",
                 )
-            for k in packed_modules_mapping:
-                # We handle the experts below in expert_params_mapping
-                if "mlp.experts." in name and name not in params_dict:
-                    continue
-                if k in name:
-                    packed_value = packed_modules_mapping[k]
-                    # Handle both tuple (fuse parameter) and list (shard parameter)
-                    if isinstance(packed_value, list):
-                        # Checkpoint has fused weight, split into separate params
-                        for shard_idx, target_name in enumerate(packed_value):
-                            param_name = name.replace(k, target_name)
+            packed_matched = False
+            # LM packed_modules_mapping uses substring keys (e.g. v_proj in qkv_proj);
+            # skip for vision weights to avoid corrupting names like visual.*.qkv_proj.
+            if "visual." not in name:
+                for k in packed_modules_mapping:
+                    # We handle the experts below in expert_params_mapping
+                    if "mlp.experts." in name and name not in params_dict:
+                        continue
+                    if k in name:
+                        packed_value = packed_modules_mapping[k]
+                        # Handle both tuple (fuse parameter) and list (shard parameter)
+                        if isinstance(packed_value, list):
+                            # Checkpoint has fused weight, split into separate params
+                            for shard_idx, target_name in enumerate(packed_value):
+                                param_name = name.replace(k, target_name)
+                                if "output_scale" not in param_name:
+                                    param = model.get_parameter(param_name)
+                                    weight_loader = getattr(param, "weight_loader")
+                                    futures.append(
+                                        executor.submit(
+                                            weight_loader, param, weight_tensor, shard_idx
+                                        )
+                                    )
+                                    loaded_weights_record.add(prefix + param_name)
+                        else:
+                            # Checkpoint has separate weights, load into fused param
+                            v, shard_id = packed_value
+                            param_name = name.replace(k, v)
+                            # FIXME output_scale has a value, so accuracy is incorrect. this should be loaded and used in llfp4.
                             if "output_scale" not in param_name:
                                 try:
                                     param = model.get_parameter(param_name)
                                 except AttributeError:
                                     continue
                                 weight_loader = getattr(param, "weight_loader")
+                                # weight_loader(param, weight_tensor, shard_id)
                                 futures.append(
                                     executor.submit(
-                                        weight_loader, param, weight_tensor, shard_idx
+                                        weight_loader, param, weight_tensor, shard_id
                                     )
                                 )
                                 loaded_weights_record.add(prefix + param_name)
-                    else:
-                        # Checkpoint has separate weights, load into fused param
-                        v, shard_id = packed_value
-                        param_name = name.replace(k, v)
-                        # FIXME output_scale has a value, so accuracy is incorrect. this should be loaded and used in llfp4.
-                        if "output_scale" not in param_name:
-                            try:
-                                param = model.get_parameter(param_name)
-                            except AttributeError:
-                                break
-                            weight_loader = getattr(param, "weight_loader")
-                            # weight_loader(param, weight_tensor, shard_id)
-                            futures.append(
-                                executor.submit(
-                                    weight_loader, param, weight_tensor, shard_id
-                                )
-                            )
-                            loaded_weights_record.add(prefix + param_name)
-                    break
-            else:
+                        packed_matched = True
+                        break
+            if not packed_matched:
                 # Detect fused expert format if model provides detection function
                 if detect_fused_expert_fn is not None and not is_fused_expert:
                     is_fused_expert = detect_fused_expert_fn(name)
