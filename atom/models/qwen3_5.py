@@ -5,7 +5,7 @@ from einops import rearrange
 from torch import nn
 
 
-from aiter.dist.parallel_state import get_tensor_model_parallel_rank
+from aiter.dist.parallel_state import get_pp_group, get_tensor_model_parallel_rank
 from atom.config import QuantizationConfig, Config
 
 from atom.model_ops.topK import is_rocm_aiter_fusion_shared_expert_enabled
@@ -22,7 +22,7 @@ from atom.model_ops.moe import FusedMoE
 from atom.model_ops.linear import (
     MergedColumnParallelLinear,
 )
-from atom.plugin.prepare import is_vllm
+from atom.plugin.prepare import is_plugin_mode, is_sglang, is_vllm
 from atom.model_ops.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from atom.models.qwen3_next import (
     Qwen3NextAttention,
@@ -195,6 +195,88 @@ class Qwen3_5GatedDeltaNet(GDN):
         output[:num_tokens] = self.out_proj(core_attn_out)
 
 
+class Qwen3_5GatedDeltaNetForSglang(Qwen3NextGatedDeltaNet):
+    """Same projections as vLLM GDN path: split ``in_proj_qkvz`` / ``in_proj_ba`` for HF weights."""
+
+    def create_qkvz_proj(
+        self,
+        hidden_size: int,
+        key_dim: int,
+        value_dim: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[key_dim, key_dim, value_dim, value_dim],
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def create_ba_proj(
+        self,
+        hidden_size: int,
+        num_v_heads: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[num_v_heads] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def create_qkvzba_proj(self) -> None:
+        self.in_proj_qkvz = self.create_qkvz_proj(
+            hidden_size=self.hidden_size,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
+            quant_config=self.quant_config,
+            prefix=f"{self.prefix}.in_proj_qkvz",
+        )
+        self.in_proj_ba = self.create_ba_proj(
+            hidden_size=self.hidden_size,
+            num_v_heads=self.num_v_heads,
+            quant_config=self.quant_config,
+            prefix=f"{self.prefix}.in_proj_ba",
+        )
+
+    def fix_query_key_value_ordering(
+        self,
+        mixed_qkvz: torch.Tensor,
+        mixed_ba: torch.Tensor,
+    ):
+        raise NotImplementedError(
+            "Qwen3.5 Series dont need to fix query key value ordering"
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        num_tokens = hidden_states.size(0)
+        mixed_qkvz = self.in_proj_qkvz(hidden_states)
+        ba = self.in_proj_ba(hidden_states)
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        z_size = self.value_dim // self.tp_size
+        num_v_heads_tp = self.num_v_heads // self.tp_size
+        mixed_qkv, z, b, a, core_attn_out = fused_split_chunk_zeros(
+            mixed_qkvz, ba, qkv_size, z_size, self.head_v_dim, num_v_heads_tp
+        )
+        core_attn_out = self.attn(mixed_qkv, b, a, core_attn_out)
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens] = self.out_proj(core_attn_out)
+
+
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
     def __init__(
         self,
@@ -213,7 +295,12 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_idx = layer_num
 
         if self.layer_type == "linear_attention":
-            self.linear_attn = Qwen3_5GatedDeltaNet(
+            gdn_cls = (
+                Qwen3_5GatedDeltaNetForSglang
+                if (is_plugin_mode() and is_sglang())
+                else Qwen3_5GatedDeltaNet
+            )
+            self.linear_attn = gdn_cls(
                 atom_config,
                 quant_config=quant_config,
                 speculative_config=speculative_config,
@@ -315,6 +402,70 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs,
+    ):
+        """SGLang VLM: ``pp_proxy_tensors``, ``input_embeds``, ``input_deepstack_embeds``."""
+        from contextlib import nullcontext
+
+        mkw = dict(model_kwargs)
+        if intermediate_tensors is None:
+            pp = mkw.pop("pp_proxy_tensors", None)
+            if pp is not None:
+                tensors = getattr(pp, "tensors", None)
+                if tensors is not None:
+                    intermediate_tensors = IntermediateTensors(dict(tensors))
+        if inputs_embeds is None:
+            inputs_embeds = mkw.pop("input_embeds", None)
+        input_deepstack = mkw.pop("input_deepstack_embeds", None)
+
+        bridge_ctx = nullcontext()
+        fb = mkw.get("forward_batch")
+        if fb is not None and is_plugin_mode() and is_sglang():
+            from atom.plugin.sglang.oot.utils.gdn_forward_helper import (
+                sglang_gdn_forward_context,
+            )
+
+            bridge_ctx = sglang_gdn_forward_context(fb)
+
+        with bridge_ctx:
+            if get_pp_group().is_first_rank:
+                if inputs_embeds is not None:
+                    hidden_states = inputs_embeds
+                else:
+                    hidden_states = self.get_input_embeddings(input_ids)
+                residual = None
+            else:
+                assert intermediate_tensors is not None
+                hidden_states = intermediate_tensors["hidden_states"]
+                residual = intermediate_tensors["residual"]
+
+            hs = self.config.hidden_size
+            for local_i, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, **mkw
+                )
+                layer_num = self.start_layer + local_i
+                if (
+                    input_deepstack is not None
+                    and input_deepstack.numel() > 0
+                    and layer_num < 3
+                ):
+                    sep = hs * layer_num
+                    hidden_states.add_(input_deepstack[:, sep : sep + hs])
+
+            if not get_pp_group().is_last_rank:
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            hidden_states, _ = self.norm(hidden_states, residual)
+            return hidden_states
+
 
 class Qwen3_5ForCausalLMBase(nn.Module):
 
@@ -356,7 +507,11 @@ class Qwen3_5ForCausalLMBase(nn.Module):
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            **kwargs,
         )
 
         return hidden_states
