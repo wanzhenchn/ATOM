@@ -918,7 +918,17 @@ class Config:
         if not hasattr(self.hf_config, "rope_parameters"):
             # Compatible with both transformers < 5
             rope_params = getattr(self.hf_config, "rope_scaling", {}) or {}
-            rope_params["rope_theta"] = self.hf_config.rope_theta
+            rope_theta = getattr(self.hf_config, "rope_theta", None)
+            if rope_theta is None:
+                _tc = getattr(self.hf_config, "text_config", None)
+                if _tc is not None:
+                    rope_theta = getattr(_tc, "rope_theta", None)
+            if rope_theta is None:
+                raise AttributeError(
+                    f"{type(self.hf_config).__name__} has no rope_theta on the root "
+                    "config or on text_config; cannot build rope_parameters for ATOM"
+                )
+            rope_params["rope_theta"] = rope_theta
             rope_params["rope_type"] = rope_params.get("rope_type", "default")
             self.hf_config.rope_parameters = rope_params
         self.quant_config = QuantizationConfig(
