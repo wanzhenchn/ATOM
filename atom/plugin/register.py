@@ -14,6 +14,8 @@ _ATOM_SUPPORTED_MODELS = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
     "Qwen3MoeForCausalLM": Qwen3MoeForCausalLM,
     "Qwen3NextForCausalLM": Qwen3NextForCausalLM,
+    "Qwen3_5ForConditionalGeneration": Qwen3_5ForCausalLM,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5MoeForCausalLM,
     "Glm4MoeForCausalLM": Glm4MoeForCausalLM,
 }
 
