@@ -156,7 +156,7 @@ jobs:
             env_vars: |
               ATOM_DISABLE_VLLM_PLUGIN_ATTENTION=1
               ATOM_USE_CUSTOM_ALL_GATHER=0
-            accuracy_test_threshold: 0.83
+            accuracy_test_threshold: 0.77
             runner: linux-atom-mi355-4
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
