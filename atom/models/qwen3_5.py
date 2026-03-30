@@ -483,7 +483,6 @@ if is_vllm():
 
         hf_to_atom_mapper = WeightsMapper(
             orig_to_new_prefix={
-                # "model.visual.": "visual.",
                 "lm_head.": "language_model.lm_head.",
                 "model.language_model.": "language_model.model.",
             }
@@ -677,7 +676,6 @@ if is_vllm():
 
         hf_to_atom_mapper = WeightsMapper(
             orig_to_new_prefix={
-                # "model.visual.": "visual.",
                 "lm_head.": "language_model.lm_head.",
                 "model.language_model.": "language_model.model.",
             }
