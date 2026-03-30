@@ -402,7 +402,8 @@ class QuantizationConfig:
         return False
 
     def remap_layer_name(
-        self, hf_config: PretrainedConfig, packed_modules_mapping: dict | None = None
+        self, hf_config: PretrainedConfig, packed_modules_mapping: dict | None = None,
+        weights_mapper = {}
     ):
         model_type = hf_config.model_type
         self.packed_modules_mapping = (
@@ -425,6 +426,9 @@ class QuantizationConfig:
         elif model_type == "qwen3_moe" or model_type == "qwen3_next":
             if getattr(hf_config, "mlp_only_layers", []):
                 self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
+
+        if weights_mapper:
+            self.exclude_layers = [weights_mapper._map_name(name) for name in self.exclude_layers]
 
         # remap
         def _remap_layer_name(name: str) -> list[str]:
