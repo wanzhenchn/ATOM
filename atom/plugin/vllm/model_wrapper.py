@@ -97,7 +97,8 @@ class ATOMModelBase(nn.Module, VllmModel, SupportsQuant, SupportsPP):
         module_remapping = getattr(model_cls, "packed_modules_mapping", {})
         weights_mapper = getattr(model_cls, "hf_to_atom_mapper", {})
         self.atom_config.quant_config.remap_layer_name(
-            self.atom_config.hf_config,  module_remapping, weights_mapper)
+            self.atom_config.hf_config, module_remapping, weights_mapper
+        )
 
         logger.info(f"Construct ATOM model {model_arch} for vLLM plugin mode")
         self.model = model_cls(self.atom_config)
