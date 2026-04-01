@@ -7,6 +7,36 @@ Subclasses SGLang in-tree ``Qwen3_5ForConditionalGeneration`` /
 Set ``SGLANG_EXTERNAL_MODEL_PACKAGE`` to the parent of this package (e.g.
 ``atom.plugin.sglang.oot``'s parent is ``atom.plugin.sglang`` — use the value
 that matches your SGLang external package convention).
+
+**Weight loading parity (FP8 / packed tensors)**
+
+- Language weights are loaded by ``atom.model_loader.loader.load_model`` (plugin
+  mode), not by SGLang's in-tree ``load_weights``. ``packed_modules_mapping``
+  must stay aligned with SGLang's ``QWEN3_5_PACKED_MODULES_MAPPING`` intent
+  (inverse mapping: HF shard name → fused param + shard id).
+
+- On HIP, SGLang's ``Qwen3_5ForCausalLM.load_weights`` applies
+  ``qwen3_5_gdn_fused_proj.FUSED_PROJ_WEIGHT_MAPPING`` before stacked QKV/MLP
+  mapping. ATOM GDN uses ``in_proj_qkvz`` / ``in_proj_ba`` only; the subset of
+  that table for ``in_proj_qkv*`` / ``in_proj_z`` / ``in_proj_b`` /
+  ``in_proj_a`` is already covered by ``_QWEN35_OOT_PACKED_MODULES_MAPPING``.
+  Checkpoints that expose a single ``in_proj_fused`` tensor (full BF16 fusion)
+  are not supported here—use HF-style split projection keys.
+
+- MoE fused expert slabs: SGLang chunks ``gate_up_proj`` on ``dim=-2``; this
+  module uses ``load_fused_expert_weights`` with orientation detection so both
+  ``[2*half, hidden]`` and ``[hidden, 2*half]`` slabs load correctly (relevant
+  for some FP8 checkpoints).
+
+- After ``super().__init__``, we assign ``quant_config.packed_modules_mapping``
+  when the config supports it, matching ``Qwen3_5ForCausalLM`` so FP8 (and other)
+  quant paths that read ``packed_modules_mapping`` see the same mapping as the
+  in-tree model class.
+
+- ``atom.plugin.prepare.prepare_model`` dispatches to
+  ``apply_prepare_model_adaptations`` (this module) for ``Qwen3_5*`` arches:
+  MoE text-config patch for ``Qwen3NextSparseMoeBlock``, then quant remap
+  (parity with vLLM ``model_wrapper`` / ROCm/ATOM#448).
 """
 
 from __future__ import annotations
@@ -37,10 +67,20 @@ from transformers.configuration_utils import layer_type_validation
 logger = logging.getLogger("atom.plugin.sglang.oot")
 
 
+# Inverse of SGLang ``QWEN3_5_PACKED_MODULES_MAPPING`` (HF split names → fused module).
+# Extra keys ``.gate.`` / ``shared_expert_gate`` support ROCm shared-expert fusion naming.
+#
+# ``gate_up_proj`` MUST appear before ``gate_proj`` / ``up_proj``: the loader matches
+# keys via substring ``k in name`` (``atom/model_loader/loader.py``). Checkpoint names
+# like ``...mlp.gate_up_proj...`` contain ``up_proj``; matching ``up_proj`` first
+# corrupts names (e.g. ``...gategate_up_proj...``) and loads garbage shapes — then
+# FP8 shuffle fails (e.g. ``AssertionError: 1 % 16 == 1``). Same ordering as ATOM
+# vLLM plugin / ROCm/ATOM#448.
 _QWEN35_OOT_PACKED_MODULES_MAPPING = {
     "q_proj": ("qkv_proj", "q"),
     "k_proj": ("qkv_proj", "k"),
     "v_proj": ("qkv_proj", "v"),
+    "gate_up_proj": ["gate_proj", "up_proj"],
     "gate_proj": ("gate_up_proj", 0),
     "up_proj": ("gate_up_proj", 1),
     "in_proj_qkv": ("in_proj_qkvz", (0, 1, 2)),
@@ -65,13 +105,52 @@ _QWEN35_SGLANG_VL_HF_MAPPER = WeightsMapper(
 )
 
 
-def _patch_qwen35_moe_text_config_for_atom(config: Any) -> None:
-    tc = getattr(config, "text_config", None)
+def _patch_qwen35_moe_text_for_sparse_moe_block(hf_config: Any) -> None:
+    """HF Qwen3.5 MoE text config often omits fields that Qwen3NextSparseMoeBlock uses."""
+    tc = getattr(hf_config, "text_config", None)
     if tc is None:
+        tc = hf_config
+    mt = getattr(tc, "model_type", "") or ""
+    if "qwen3_5" not in mt or "moe" not in mt:
         return
     tc.n_shared_experts = 1
     if hasattr(tc, "num_experts"):
         tc.n_routed_experts = tc.num_experts
+
+
+def remap_qwen35_quant_config_for_sglang_plugin(atom_config: Any) -> None:
+    """Align ``QuantizationConfig`` layer patterns with OOT weight names (vLLM PR #448).
+
+    vLLM plugin calls ``quant_config.remap_layer_name`` in ``model_wrapper`` before
+    building the ATOM model; SGLang OOT must do the same so FP8 layer patterns /
+    ``exclude_layers`` match parameter names after HF→SGLang prefix mapping.
+    """
+    atom_config.quant_config.remap_layer_name(
+        atom_config.hf_config,
+        packed_modules_mapping=dict(_QWEN35_OOT_PACKED_MODULES_MAPPING),
+        weights_mapper=_QWEN35_SGLANG_VL_HF_MAPPER,
+    )
+
+
+_QWEN35_PREPARE_MOE_ARCHES = frozenset(
+    ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
+)
+_QWEN35_PREPARE_REMAP_ARCHES = frozenset(
+    ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration")
+)
+
+
+def apply_prepare_model_adaptations(atom_config: Any, model_arch: str) -> None:
+    """Qwen3.5-only hooks for ``atom.plugin.prepare.prepare_model`` (before ATOM LM build)."""
+    if model_arch in _QWEN35_PREPARE_MOE_ARCHES:
+        _patch_qwen35_moe_text_for_sparse_moe_block(atom_config.hf_config)
+    if model_arch in _QWEN35_PREPARE_REMAP_ARCHES:
+        remap_qwen35_quant_config_for_sglang_plugin(atom_config)
+
+
+def _patch_qwen35_moe_text_config_for_atom(config: Any) -> None:
+    """VLM ``__init__``: same MoE text patch as prepare_model (multimodal root config)."""
+    _patch_qwen35_moe_text_for_sparse_moe_block(config)
 
 
 class _AtomQwen35FlatLanguageStack(nn.Module):
@@ -159,10 +238,7 @@ class _AtomQwen35FlatLanguageStack(nn.Module):
 
 
 class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
-    packed_modules_mapping = {
-        **_QWEN35_OOT_PACKED_MODULES_MAPPING,
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = _QWEN35_OOT_PACKED_MODULES_MAPPING
 
     def __init__(
         self,
@@ -181,6 +257,10 @@ class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
+        if quant_config is not None and hasattr(
+            quant_config, "packed_modules_mapping"
+        ):
+            quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -193,10 +273,7 @@ class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
 
 
 class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
-    packed_modules_mapping = {
-        **_QWEN35_OOT_PACKED_MODULES_MAPPING,
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    packed_modules_mapping = _QWEN35_OOT_PACKED_MODULES_MAPPING
 
     def __init__(
         self,
@@ -216,6 +293,10 @@ class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
+        if quant_config is not None and hasattr(
+            quant_config, "packed_modules_mapping"
+        ):
+            quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
