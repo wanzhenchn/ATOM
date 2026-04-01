@@ -35,19 +35,6 @@ def _set_framework_backbone(framework: str) -> None:
     _CURRENT_FRAMEWORK = framework
 
 
-def _patch_qwen35_moe_text_for_sparse_moe_block(hf_config: Any) -> None:
-    """HF Qwen3.5 MoE text config often omits fields that Qwen3NextSparseMoeBlock uses."""
-    tc = getattr(hf_config, "text_config", None)
-    if tc is None:
-        tc = hf_config
-    mt = getattr(tc, "model_type", "") or ""
-    if "qwen3_5" not in mt or "moe" not in mt:
-        return
-    tc.n_shared_experts = 1
-    if hasattr(tc, "num_experts"):
-        tc.n_routed_experts = tc.num_experts
-
-
 def prepare_model(config: Any, engine: str):
     """
     Prepare the model to upper framework SGLang
@@ -84,11 +71,10 @@ def prepare_model(config: Any, engine: str):
 
     atom_config = generate_atom_config_for_plugin_mode(config)
 
-    if model_arch in (
-        "Qwen3_5MoeForConditionalGeneration",
-        "Qwen3_5MoeForCausalLM",
-    ):
-        _patch_qwen35_moe_text_for_sparse_moe_block(atom_config.hf_config)
+    if model_arch.startswith("Qwen3_5"):
+        from atom.plugin.sglang.oot.qwen3_5 import apply_prepare_model_adaptations
+
+        apply_prepare_model_adaptations(atom_config, model_arch)
 
     model_cls = _ATOM_SUPPORTED_MODELS[model_arch]
     logger.info(f"ATOM model class for {model_arch} is {model_cls}")
