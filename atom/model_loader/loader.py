@@ -216,6 +216,20 @@ def load_model_in_plugin_mode(
     return loaded_weights_record
 
 
+def _packed_mapping_key_matches_weight_name(weight_name: str, k: str) -> bool:
+    """True if ``k`` matches a full dot-separated path segment, not a mere substring.
+
+    Plain ``k in weight_name`` breaks fused keys: ``up_proj`` inside ``gate_up_proj``,
+    ``v_proj`` inside ``qkv_proj``, ``in_proj_qkv`` inside ``in_proj_qkvz``, etc.
+    Keys that start or end with ``.`` keep substring behavior (e.g. ``.gate.``).
+    """
+    if k.startswith(".") or k.endswith("."):
+        return k in weight_name
+    return (
+        re.search(r"(?:^|\.)" + re.escape(k) + r"(?:\.|$)", weight_name) is not None
+    )
+
+
 def load_model(
     model: nn.Module,
     model_name_or_path: str,
@@ -338,18 +352,19 @@ def load_model(
                     f"mlp.experts.{hf_config.n_routed_experts}.",
                 )
             packed_matched = False
-            # LM packed_modules_mapping uses substring keys (e.g. v_proj in qkv_proj);
-            # skip for vision weights to avoid corrupting names like visual.*.qkv_proj.
+            # Path-segment match + longest key first (see _packed_mapping_key_matches_weight_name).
             if "visual." not in name:
+                packed_candidates: list[str] = []
                 for k in packed_modules_mapping:
-                    # We handle the experts below in expert_params_mapping
                     if "mlp.experts." in name and name not in params_dict:
                         continue
-                    if k in name:
+                    if _packed_mapping_key_matches_weight_name(name, k):
+                        packed_candidates.append(k)
+                if packed_candidates:
+                    for k in sorted(packed_candidates, key=len, reverse=True):
                         packed_value = packed_modules_mapping[k]
-                        # Handle both tuple (fuse parameter) and list (shard parameter)
+                        handled = False
                         if isinstance(packed_value, list):
-                            # Checkpoint has fused weight, split into separate params
                             for shard_idx, target_name in enumerate(packed_value):
                                 param_name = name.replace(k, target_name)
                                 if "output_scale" not in param_name:
@@ -361,26 +376,26 @@ def load_model(
                                         )
                                     )
                                     loaded_weights_record.add(prefix + param_name)
+                            handled = True
                         else:
-                            # Checkpoint has separate weights, load into fused param
                             v, shard_id = packed_value
                             param_name = name.replace(k, v)
-                            # FIXME output_scale has a value, so accuracy is incorrect. this should be loaded and used in llfp4.
                             if "output_scale" not in param_name:
                                 try:
                                     param = model.get_parameter(param_name)
                                 except AttributeError:
                                     continue
                                 weight_loader = getattr(param, "weight_loader")
-                                # weight_loader(param, weight_tensor, shard_id)
                                 futures.append(
                                     executor.submit(
                                         weight_loader, param, weight_tensor, shard_id
                                     )
                                 )
                                 loaded_weights_record.add(prefix + param_name)
-                        packed_matched = True
-                        break
+                            handled = True
+                        if handled:
+                            packed_matched = True
+                            break
             if not packed_matched:
                 # Detect fused expert format if model provides detection function
                 if detect_fused_expert_fn is not None and not is_fused_expert:
