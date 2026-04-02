@@ -70,13 +70,16 @@ logger = logging.getLogger("atom.plugin.sglang.oot")
 # Inverse of SGLang ``QWEN3_5_PACKED_MODULES_MAPPING`` (HF split names → fused module).
 # Extra keys ``.gate.`` / ``shared_expert_gate`` support ROCm shared-expert fusion naming.
 #
-# ``gate_up_proj`` MUST appear before ``gate_proj`` / ``up_proj``: the loader matches
-# keys via substring ``k in name`` (``atom/model_loader/loader.py``). Checkpoint names
-# like ``...mlp.gate_up_proj...`` contain ``up_proj``; matching ``up_proj`` first
-# corrupts names (e.g. ``...gategate_up_proj...``) and loads garbage shapes — then
-# FP8 shuffle fails (e.g. ``AssertionError: 1 % 16 == 1``). Same ordering as ATOM
-# vLLM plugin / ROCm/ATOM#448.
+# Loader uses path-segment matching (``atom/model_loader/loader.py``) so ``v_proj``
+# does not match inside ``qkv_proj``, ``in_proj_qkv`` not inside ``in_proj_qkvz``, etc.
+# Dynamic FP8 checkpoints often use fused tensor names; ``(name, None)`` rows use
+# ``MergedColumnParallelLinear.weight_loader`` fused split. Without this, ATOM plugin
+# load corrupts weights vs native SGLang ``CompressedTensorsW8A8Fp8MoE`` and
+# ``shuffle_weight`` fails (e.g. ``1 % 16 == 1``).
 _QWEN35_OOT_PACKED_MODULES_MAPPING = {
+    "qkv_proj": ("qkv_proj", None),
+    "in_proj_qkvz": ("in_proj_qkvz", None),
+    "in_proj_ba": ("in_proj_ba", None),
     "q_proj": ("qkv_proj", "q"),
     "k_proj": ("qkv_proj", "k"),
     "v_proj": ("qkv_proj", "v"),
