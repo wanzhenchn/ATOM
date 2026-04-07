@@ -45,6 +45,11 @@ except ImportError as e:
         f"available on your AMD system. Original import error: {e}"
     ) from e
 
+try:
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+except ImportError:  # pragma: no cover
+    get_recommended_splits = None  # type: ignore[misc, assignment]
+
 # MLA prefill kernels - imported separately to avoid breaking the main aiter imports
 mla_prefill_ps_asm_fwd = None
 mla_reduce_v1 = None
@@ -1463,16 +1468,97 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
             )
         else:
             q_3d = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-            pa_fwd_asm(
-                Q=q_3d,
-                K=new_key_cache,
-                V=new_value_cache,
-                block_tables=self.forward_metadata.page_table,
-                context_lens=self.forward_metadata.kv_lens,
-                block_tables_stride0=self.forward_metadata.page_table.stride(0),
-                K_QScale=self.k_scale,
-                V_QScale=self.v_scale,
-                out_=o,
-            )
+            sliding = getattr(layer, "sliding_window_size", -1) or -1
+            # pa_fwd_asm (ASM) only supports head_size=128; match attention_mha.py
+            # and use Triton pa_decode_gluon for larger heads / sliding windows.
+            use_triton_decode = layer.head_dim != 128 or sliding > 0
+            if use_triton_decode:
+                if get_recommended_splits is None:
+                    raise ImportError(
+                        "Decode with head_dim != 128 requires "
+                        "aiter.ops.triton.gluon.pa_decode_gluon.get_recommended_splits"
+                    )
+                _, num_kv_heads_g, _, _, _ = new_key_cache.shape
+                num_q_heads_total = layer.tp_q_head_num
+                query_group_size = num_q_heads_total // num_kv_heads_g
+                max_context_partition_num = get_recommended_splits(
+                    batch_size, num_kv_heads_g
+                )
+                context_partition_size = 256
+                if sliding > 0:
+                    max_context_partition_num = 1
+                    context_partition_size = 128
+
+                intermediate_shape = (
+                    batch_size,
+                    num_kv_heads_g,
+                    max_context_partition_num,
+                    query_group_size,
+                )
+                exp_sums = torch.empty(
+                    intermediate_shape, dtype=torch.float32, device=q.device
+                )
+                max_logits = torch.empty(
+                    intermediate_shape, dtype=torch.float32, device=q.device
+                )
+                temporary_output = torch.empty(
+                    *intermediate_shape,
+                    layer.head_dim,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
+
+                k_scale_arg = self.k_scale
+                v_scale_arg = self.v_scale
+                if k_scale_arg is not None and k_scale_arg.numel() > 1:
+                    k_scale_arg = k_scale_arg.unsqueeze(-1)
+                    v_scale_arg = v_scale_arg.unsqueeze(-1)
+
+                kv_bf16 = new_key_cache.dtype in (torch.bfloat16, torch.float16)
+                compute_type = torch.bfloat16 if kv_bf16 else dtypes.fp8
+
+                ctx_lens = self.forward_metadata.kv_lens
+                blk_tbl = self.forward_metadata.page_table
+                if ctx_lens.shape[0] > batch_size:
+                    ctx_lens = ctx_lens[:batch_size]
+                if blk_tbl.shape[0] > batch_size:
+                    blk_tbl = blk_tbl[:batch_size]
+
+                o_3d = o.view(-1, layer.tp_q_head_num, head_dim_out)
+                torch.ops.aiter.pa_decode_gluon(
+                    o_3d,
+                    q_3d,
+                    new_key_cache,
+                    new_value_cache,
+                    ctx_lens,
+                    blk_tbl,
+                    layer.scaling,
+                    1,
+                    max_context_partition_num,
+                    context_partition_size,
+                    compute_type,
+                    None,
+                    None if kv_bf16 else k_scale_arg,
+                    None if kv_bf16 else v_scale_arg,
+                    exp_sums=exp_sums,
+                    max_logits=max_logits,
+                    temporary_output=temporary_output,
+                    alibi_slopes=None,
+                    sinks=getattr(layer, "sinks", None),
+                    sliding_window=sliding if sliding > 0 else -1,
+                    ps=True,
+                )
+            else:
+                pa_fwd_asm(
+                    Q=q_3d,
+                    K=new_key_cache,
+                    V=new_value_cache,
+                    block_tables=self.forward_metadata.page_table,
+                    context_lens=self.forward_metadata.kv_lens,
+                    block_tables_stride0=self.forward_metadata.page_table.stride(0),
+                    K_QScale=self.k_scale,
+                    V_QScale=self.v_scale,
+                    out_=o,
+                )
 
         return o.view(-1, layer.tp_q_head_num * head_dim_out)
