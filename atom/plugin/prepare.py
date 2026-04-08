@@ -71,15 +71,13 @@ def prepare_model(config: Any, engine: str):
 
     atom_config = generate_atom_config_for_plugin_mode(config)
 
-    if model_arch.startswith("Qwen3_5"):
-        from atom.plugin.sglang.oot.qwen3_5 import apply_prepare_model_adaptations
-
-        apply_prepare_model_adaptations(atom_config, model_arch)
-
     model_cls = _ATOM_SUPPORTED_MODELS[model_arch]
     logger.info(f"ATOM model class for {model_arch} is {model_cls}")
 
     if is_sglang():
+        from atom.plugin.sglang.utils.prepare_hooks import run_sglang_prepare_hooks
+
+        run_sglang_prepare_hooks(model_arch, atom_config)
         register_ops_to_sglang(atom_config=atom_config)
 
     set_attn_cls()

@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Helpers to wire SGLang ForwardBatch + hybrid mamba pool into ATOM ForwardContext for GatedDeltaNet."""
+"""Bridge SGLang ``ForwardBatch`` (hybrid mamba pool) into ATOM ``ForwardContext`` for GatedDeltaNet.
+
+Consumed from ``atom.plugin.sglang.models`` wrappers so ``atom.models`` stays free of plugin imports.
+"""
 
 from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import torch
 
@@ -29,11 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 def _linear_attn_backend(attn_backend: Any) -> Any:
-    """HybridLinearAttnBackend wraps the GDN (MambaAttnBackendBase) instance."""
+    """``HybridLinearAttnBackend`` wraps the GDN (``MambaAttnBackendBase``) instance."""
     return getattr(attn_backend, "linear_attn_backend", attn_backend)
 
 
-def _build_kv_cache_data(forward_batch: Any) -> Dict[str, KVCacheTensor]:
+def kv_cache_tensors_from_mamba_pool(forward_batch: Any) -> Dict[str, KVCacheTensor]:
+    """Map SGLang mamba layer caches to ATOM ``KVCacheTensor`` entries (``layer_{id}`` keys)."""
     pool = forward_batch.req_to_token_pool
     mamba_map = getattr(pool, "mamba_map", None)
     if mamba_map is None:
@@ -55,7 +59,10 @@ def _build_kv_cache_data(forward_batch: Any) -> Dict[str, KVCacheTensor]:
     return out
 
 
-def _build_gdn_metadata(forward_batch: Any, linear_backend: Any) -> Optional[GDNAttentionMetadata]:
+def gdn_metadata_from_forward_batch(
+    forward_batch: Any, linear_backend: Any
+) -> Optional[GDNAttentionMetadata]:
+    """Build :class:`GDNAttentionMetadata` from SGLang attention backend metadata, or ``None``."""
     fm = getattr(linear_backend, "forward_metadata", None)
     if fm is None:
         return None
@@ -63,7 +70,7 @@ def _build_gdn_metadata(forward_batch: Any, linear_backend: Any) -> Optional[GDN
     mode = forward_batch.forward_mode
     if mode.is_target_verify():
         logger.warning(
-            "SGLang GDN forward helper: TARGET_VERIFY is not supported; GDN metadata skipped."
+            "SGLang GDN bridge: TARGET_VERIFY is not supported; GDN metadata skipped."
         )
         return None
 
@@ -128,26 +135,26 @@ def _build_gdn_metadata(forward_batch: Any, linear_backend: Any) -> Optional[GDN
         )
 
     logger.warning(
-        "SGLang GDN forward helper: unsupported forward_mode=%s; GDN metadata skipped.",
+        "SGLang GDN bridge: unsupported forward_mode=%s; GDN metadata skipped.",
         mode,
     )
     return None
 
 
 @contextmanager
-def sglang_gdn_forward_context(forward_batch: Any):
-    """Populate ATOM ForwardContext + kv_cache_data for one model forward."""
+def sglang_gdn_bridge(forward_batch: Any) -> Iterator[None]:
+    """Attach ATOM forward / KV context for one model forward when ``forward_batch`` is usable."""
     if forward_batch is None:
         yield
         return
 
     linear_be = _linear_attn_backend(forward_batch.attn_backend)
-    gmd = _build_gdn_metadata(forward_batch, linear_be)
+    gmd = gdn_metadata_from_forward_batch(forward_batch, linear_be)
     if gmd is None:
         yield
         return
 
-    kv = _build_kv_cache_data(forward_batch)
+    kv = kv_cache_tensors_from_mamba_pool(forward_batch)
     if not kv:
         yield
         return
@@ -181,3 +188,7 @@ def sglang_gdn_forward_context(forward_batch: Any):
     finally:
         reset_forward_context()
         set_kv_cache_data(prev_kv if prev_kv is not None else {})
+
+
+# Backward-compatible name (same object).
+sglang_gdn_forward_context = sglang_gdn_bridge

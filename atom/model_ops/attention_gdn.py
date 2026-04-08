@@ -173,8 +173,6 @@ class GatedDeltaNet(nn.Module):
         core_attn_out: torch.Tensor,
         layer_name: str,
     ):
-        from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
-
         fwd_ctx: ForwardContext = get_forward_context()
         am = fwd_ctx.attn_metadata
         # Default ForwardContext uses attn_metadata={}; vLLM path uses AttentionMetaData
