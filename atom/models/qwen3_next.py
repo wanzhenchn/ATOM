@@ -1018,44 +1018,29 @@ class Qwen3NextModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **model_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        from contextlib import nullcontext
-
-        bridge_ctx = nullcontext()
-        fb = model_kwargs.get("forward_batch")
-        if fb is not None:
-            from atom.plugin.prepare import is_plugin_mode, is_sglang
-
-            if is_plugin_mode() and is_sglang():
-                from atom.plugin.sglang.oot.utils.gdn_forward_helper import (
-                    sglang_gdn_forward_context,
-                )
-
-                bridge_ctx = sglang_gdn_forward_context(fb)
-
-        with bridge_ctx:
-            if get_pp_group().is_first_rank:
-                if inputs_embeds is not None:
-                    hidden_states = inputs_embeds
-                else:
-                    hidden_states = self.get_input_embeddings(input_ids)
-                residual = None
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
             else:
-                assert intermediate_tensors is not None
-                hidden_states = intermediate_tensors["hidden_states"]
-                residual = intermediate_tensors["residual"]
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
 
-            for layer in self.layers[self.start_layer : self.end_layer]:
-                hidden_states, residual = layer(
-                    positions, hidden_states, residual, **model_kwargs
-                )
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **model_kwargs
+            )
 
-            if not get_pp_group().is_last_rank:
-                return IntermediateTensors(
-                    {"hidden_states": hidden_states, "residual": residual}
-                )
-            hidden_states, _ = self.norm(hidden_states, residual)
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
 
-            return hidden_states
+        return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales

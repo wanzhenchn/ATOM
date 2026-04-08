@@ -53,7 +53,9 @@ def register_ops_to_sglang(atom_config: Config) -> None:
 
     Set ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1`` to keep SGLang's built-in
     ``AiterAttnBackend`` instead of ``ATOMAttnBackendForSgl`` (see PR #355).
-    Qwen3.5 OOT uses a default in ``atom.plugin.sglang.models.qwen3_5``.
+    The built-in Qwen prepare hook (``Qwen3_5*`` / ``Qwen3NextForCausalLM``)
+    defaults this to ``1`` unless already set in the environment; other arches
+    do not.
     """
     if envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND:
         logger.info(

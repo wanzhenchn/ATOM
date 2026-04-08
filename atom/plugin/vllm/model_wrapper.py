@@ -28,7 +28,6 @@ from vllm.forward_context import (
 import atom  # noqa: F401
 from atom.plugin.config import generate_atom_config_for_plugin_mode
 from atom.plugin.prepare import _set_framework_backbone
-from atom.model_loader.loader import load_model_in_plugin_mode
 
 import logging
 
