@@ -1,12 +1,10 @@
-"""ATOM Qwen3.5 VLM for SGLang external model inference (out-of-tree).
+"""ATOM Qwen3.5 VLM for SGLang external model inference.
+
+Set ``SGLANG_EXTERNAL_MODEL_PACKAGE`` to ``atom.plugin.sglang.models``.
 
 Subclasses SGLang in-tree ``Qwen3_5ForConditionalGeneration`` /
 ``Qwen3_5MoeForConditionalGeneration``; language stack is built via
 ``atom.prepare_model(..., engine="sglang")``.
-
-Set ``SGLANG_EXTERNAL_MODEL_PACKAGE`` to the parent of this package (e.g.
-``atom.plugin.sglang.oot``'s parent is ``atom.plugin.sglang`` — use the value
-that matches your SGLang external package convention).
 
 **Weight loading parity (FP8 / packed tensors)**
 
@@ -33,27 +31,24 @@ that matches your SGLang external package convention).
   quant paths that read ``packed_modules_mapping`` see the same mapping as the
   in-tree model class.
 
-- ``atom.plugin.prepare.prepare_model`` dispatches to
-  ``apply_prepare_model_adaptations`` (this module) for ``Qwen3_5*`` arches:
-  MoE text-config patch for ``Qwen3NextSparseMoeBlock``, then quant remap
-  (parity with vLLM ``model_wrapper`` / ROCm/ATOM#448).
+- ``utils.prepare_hooks._qwen3_prepare_hook`` defaults
+  ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND`` for ``Qwen3_5*`` and
+  ``Qwen3NextForCausalLM`` only (native ``AiterAttnBackend`` vs ATOM override;
+  PR #355) before ``register_ops_to_sglang``. ``apply_prepare_model_adaptations``
+  handles ``Qwen3_5*``-only MoE text-config patch, quant remap / ROCm/ATOM#448 —
+  override with ``=0`` in the environment if needed.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-
-# Before ``register_ops_to_sglang`` runs, prefer SGLang built-in ``AiterAttnBackend``
-# over ``ATOMAttnBackendForSgl`` for this OOT path (PR #355). Override with
-# ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=0`` in the environment if needed.
-os.environ.setdefault("ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND", "1")
 from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
 from torch import nn
 
+from aiter.dist.parallel_state import get_pp_group as _aiter_pp_group
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import (
@@ -66,11 +61,12 @@ from sglang.srt.models.qwen3_5 import (
 )
 
 from atom.model_loader.loader import WeightsMapper, load_model_in_plugin_mode
-from atom.models.qwen3_5 import Qwen3_5Model
+import atom.models.qwen3_5 as _qwen35_shim
+from atom.models.qwen3_5 import Qwen3_5Model as _Qwen3_5ModelCore
 from atom.models.utils import IntermediateTensors
-from transformers.configuration_utils import layer_type_validation
+from atom.plugin.sglang.utils.gdn_forward_helper import sglang_gdn_bridge
 
-logger = logging.getLogger("atom.plugin.sglang.oot")
+logger = logging.getLogger("atom.plugin.sglang.models.qwen3_5")
 
 
 # Inverse of SGLang ``QWEN3_5_PACKED_MODULES_MAPPING`` (HF split names → fused module).
@@ -128,10 +124,10 @@ def _patch_qwen35_moe_text_for_sparse_moe_block(hf_config: Any) -> None:
 
 
 def remap_qwen35_quant_config_for_sglang_plugin(atom_config: Any) -> None:
-    """Align ``QuantizationConfig`` layer patterns with OOT weight names (vLLM PR #448).
+    """Align ``QuantizationConfig`` layer patterns with external-model weight names (vLLM PR #448).
 
     vLLM plugin calls ``quant_config.remap_layer_name`` in ``model_wrapper`` before
-    building the ATOM model; SGLang OOT must do the same so FP8 layer patterns /
+    building the ATOM model; SGLang external registration must do the same so FP8 layer patterns /
     ``exclude_layers`` match parameter names after HF→SGLang prefix mapping.
     """
     atom_config.quant_config.remap_layer_name(
@@ -149,12 +145,83 @@ _QWEN35_PREPARE_REMAP_ARCHES = frozenset(
 )
 
 
+class Qwen3_5SglangModel(_Qwen3_5ModelCore):
+    """``Qwen3_5Model`` for SGLang: VLM kwargs, deepstack, and GDN forward-context bridge.
+
+    Implements the forward previously on ``atom.models.qwen3_5.Qwen3_5Model`` so
+    ``atom.models`` stays free of SGLang-specific tensor handling.
+    """
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: Any,
+    ):
+        mkw = dict(model_kwargs)
+        if intermediate_tensors is None:
+            pp = mkw.pop("pp_proxy_tensors", None)
+            if pp is not None:
+                tensors = getattr(pp, "tensors", None)
+                if tensors is not None:
+                    intermediate_tensors = IntermediateTensors(dict(tensors))
+        if inputs_embeds is None:
+            inputs_embeds = mkw.pop("input_embeds", None)
+        input_deepstack = mkw.pop("input_deepstack_embeds", None)
+
+        fb = mkw.get("forward_batch")
+        with sglang_gdn_bridge(fb):
+            if _aiter_pp_group().is_first_rank:
+                if inputs_embeds is not None:
+                    hidden_states = inputs_embeds
+                else:
+                    hidden_states = self.get_input_embeddings(input_ids)
+                residual = None
+            else:
+                assert intermediate_tensors is not None
+                hidden_states = intermediate_tensors["hidden_states"]
+                residual = intermediate_tensors["residual"]
+
+            hs = self.config.hidden_size
+            for local_i, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer]
+            ):
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, **mkw
+                )
+                layer_num = self.start_layer + local_i
+                if (
+                    input_deepstack is not None
+                    and input_deepstack.numel() > 0
+                    and layer_num < 3
+                ):
+                    sep = hs * layer_num
+                    hidden_states.add_(input_deepstack[:, sep : sep + hs])
+
+            if not _aiter_pp_group().is_last_rank:
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            hidden_states, _ = self.norm(hidden_states, residual)
+            return hidden_states
+
+
+def _apply_qwen35_sglang_model_patch() -> None:
+    """Swap ``atom.models.qwen3_5.Qwen3_5Model`` for :class:`Qwen3_5SglangModel` (idempotent)."""
+    if _qwen35_shim.Qwen3_5Model is Qwen3_5SglangModel:
+        return
+    _qwen35_shim.Qwen3_5Model = Qwen3_5SglangModel
+
+
 def apply_prepare_model_adaptations(atom_config: Any, model_arch: str) -> None:
-    """Qwen3.5-only hooks for ``atom.plugin.prepare.prepare_model`` (before ATOM LM build)."""
+    """Qwen3.5-only hooks for ``prepare_model`` (before ATOM LM build)."""
     if model_arch in _QWEN35_PREPARE_MOE_ARCHES:
         _patch_qwen35_moe_text_for_sparse_moe_block(atom_config.hf_config)
     if model_arch in _QWEN35_PREPARE_REMAP_ARCHES:
         remap_qwen35_quant_config_for_sglang_plugin(atom_config)
+    _apply_qwen35_sglang_model_patch()
 
 
 def _patch_qwen35_moe_text_config_for_atom(config: Any) -> None:
@@ -233,7 +300,7 @@ class _AtomQwen35FlatLanguageStack(nn.Module):
         if input_deepstack_embeds is not None:
             model_kwargs["input_deepstack_embeds"] = input_deepstack_embeds
 
-        out = Qwen3_5Model.forward(
+        out = _qwen35_shim.Qwen3_5Model.forward(
             self,
             input_ids,
             positions,
