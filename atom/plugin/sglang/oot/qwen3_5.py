@@ -42,6 +42,12 @@ that matches your SGLang external package convention).
 from __future__ import annotations
 
 import logging
+import os
+
+# Before ``register_ops_to_sglang`` runs, prefer SGLang built-in ``AiterAttnBackend``
+# over ``ATOMAttnBackendForSgl`` for this OOT path (PR #355). Override with
+# ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=0`` in the environment if needed.
+os.environ.setdefault("ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND", "1")
 from collections.abc import Iterable
 from typing import Any, Optional
 
