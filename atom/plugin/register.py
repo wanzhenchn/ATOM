@@ -8,6 +8,7 @@ from atom.models.glm4_moe import Glm4MoeForCausalLM
 from atom.models.deepseek_v2 import DeepseekV3ForCausalLM
 from atom.config import Config
 from atom.plugin.prepare import is_vllm, is_sglang
+from atom.utils import envs
 
 logger = logging.getLogger("atom")
 
@@ -48,9 +49,19 @@ def _register_custom_attention_to_sglang() -> None:
 
 def register_ops_to_sglang(atom_config: Config) -> None:
     """
-    Register custom ops to sglang, including attention
+    Register custom ops to sglang, including attention.
+
+    Set ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1`` to keep SGLang's built-in
+    ``AiterAttnBackend`` instead of ``ATOMAttnBackendForSgl`` (see PR #355).
+    Qwen3.5 OOT uses a default in ``atom.plugin.sglang.models.qwen3_5``.
     """
-    _register_custom_attention_to_sglang()
+    if envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND:
+        logger.info(
+            "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1: skipping custom 'aiter' backend "
+            "ATOMAttnBackendForSgl registration; SGLang will use its built-in AiterAttnBackend."
+        )
+    else:
+        _register_custom_attention_to_sglang()
 
 
 def set_attn_cls() -> None:
