@@ -225,9 +225,7 @@ def _packed_mapping_key_matches_weight_name(weight_name: str, k: str) -> bool:
     """
     if k.startswith(".") or k.endswith("."):
         return k in weight_name
-    return (
-        re.search(r"(?:^|\.)" + re.escape(k) + r"(?:\.|$)", weight_name) is not None
-    )
+    return re.search(r"(?:^|\.)" + re.escape(k) + r"(?:\.|$)", weight_name) is not None
 
 
 def load_model(
@@ -372,7 +370,10 @@ def load_model(
                                     weight_loader = getattr(param, "weight_loader")
                                     futures.append(
                                         executor.submit(
-                                            weight_loader, param, weight_tensor, shard_idx
+                                            weight_loader,
+                                            param,
+                                            weight_tensor,
+                                            shard_idx,
                                         )
                                     )
                                     loaded_weights_record.add(prefix + param_name)

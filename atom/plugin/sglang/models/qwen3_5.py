@@ -333,9 +333,7 @@ class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
-        if quant_config is not None and hasattr(
-            quant_config, "packed_modules_mapping"
-        ):
+        if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
 
@@ -369,9 +367,7 @@ class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
-        if quant_config is not None and hasattr(
-            quant_config, "packed_modules_mapping"
-        ):
+        if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
 
@@ -415,9 +411,7 @@ class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
         )
 
     @staticmethod
-    def _gate_up_halves_for_split(
-        half_param: int, tp_size: int
-    ) -> list[int]:
+    def _gate_up_halves_for_split(half_param: int, tp_size: int) -> list[int]:
         """Order matters: prefer full-checkpoint half before TP-local layout.
 
         HF stores ``gate_up_proj`` as ``[E, 2 * moe_intermediate, hidden]``
