@@ -219,6 +219,7 @@ def test_qwen35_sglang_model_shim_patch_is_idempotent():
         with _qwen35_shim_import_context():
             import atom.models.qwen3_5 as shim
             from atom.plugin.sglang.models import qwen3_5 as q35
+
             orig = shim.Qwen3_5Model
             try:
                 q35._apply_qwen35_sglang_model_patch()
