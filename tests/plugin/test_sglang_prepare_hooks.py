@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import types
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -21,31 +21,15 @@ from atom.plugin.sglang.utils.prepare_hooks import run_sglang_prepare_hooks
 from atom.utils import envs
 
 _ENV_KEY = "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND"
-_MISSING = object()
 
 
 @contextmanager
-def _stub_sglang_qwen_prepare_modules():
+def _stub_qwen35_prepare_module():
     q35 = types.ModuleType("atom.plugin.sglang.models.qwen3_5")
     q35.apply_prepare_model_adaptations = MagicMock()
-    qn = types.ModuleType("atom.plugin.sglang.models.qwen3_next")
-    qn.apply_qwen3_next_sglang_model_patch = MagicMock()
-    names = (
-        "atom.plugin.sglang.models.qwen3_5",
-        "atom.plugin.sglang.models.qwen3_next",
-    )
-    saved = {n: sys.modules.get(n, _MISSING) for n in names}
-    sys.modules["atom.plugin.sglang.models.qwen3_5"] = q35
-    sys.modules["atom.plugin.sglang.models.qwen3_next"] = qn
-    try:
-        yield
-    finally:
-        for n in names:
-            prev = saved[n]
-            if prev is _MISSING:
-                sys.modules.pop(n, None)
-            else:
-                sys.modules[n] = prev
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "atom.plugin.sglang.models.qwen3_5", q35)
+        yield q35.apply_prepare_model_adaptations
 
 
 def _register_ops_gate(_atom_config: Any, register_custom: MagicMock) -> None:
@@ -63,36 +47,43 @@ def _clear_native_aiter_env(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize(
-    "model_arch",
-    ("Qwen3_5ForCausalLM", "Qwen3NextForCausalLM"),
+    "model_arch,preset,expected_env,expected_native,expect_prepare_call",
+    (
+        ("Qwen3_5ForCausalLM", None, "1", True, True),
+        ("Qwen3NextForCausalLM", None, "1", True, False),
+        ("DeepseekV3ForCausalLM", None, None, False, False),
+        ("Qwen3ForCausalLM", None, None, False, False),
+        ("Qwen3_5ForCausalLM", "0", "0", False, True),
+        ("Qwen3_5ForCausalLM", "1", "1", True, True),
+    ),
 )
-def test_prepare_hooks_setdefault_native_aiter_for_qwen(model_arch: str):
-    with _stub_sglang_qwen_prepare_modules():
-        run_sglang_prepare_hooks(model_arch, MagicMock())
-    assert os.environ.get(_ENV_KEY) == "1"
-
-
-@pytest.mark.parametrize(
-    "model_arch",
-    ("DeepseekV3ForCausalLM", "Qwen3ForCausalLM"),
-)
-def test_prepare_hooks_no_setdefault_for_non_qwen_oot(model_arch: str):
-    run_sglang_prepare_hooks(model_arch, MagicMock())
-    assert os.getenv(_ENV_KEY) is None
-
-
-@pytest.mark.parametrize(
-    "preset,expect_false_via_envs",
-    (("0", True), ("1", False)),
-)
-def test_prepare_hooks_setdefault_respects_existing_env(
-    monkeypatch: pytest.MonkeyPatch, preset: str, expect_false_via_envs: bool
+def test_prepare_hooks_native_aiter_env_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+    model_arch: str,
+    preset: str | None,
+    expected_env: str | None,
+    expected_native: bool,
+    expect_prepare_call: bool,
 ):
-    monkeypatch.setenv(_ENV_KEY, preset)
-    with _stub_sglang_qwen_prepare_modules():
-        run_sglang_prepare_hooks("Qwen3_5ForCausalLM", MagicMock())
-    assert os.environ[_ENV_KEY] == preset
-    assert envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND is (not expect_false_via_envs)
+    if preset is None:
+        monkeypatch.delenv(_ENV_KEY, raising=False)
+    else:
+        monkeypatch.setenv(_ENV_KEY, preset)
+
+    ctx = (
+        _stub_qwen35_prepare_module()
+        if model_arch.startswith("Qwen3_5")
+        else nullcontext()
+    )
+    with ctx as prepare_mock:
+        run_sglang_prepare_hooks(model_arch, MagicMock())
+
+    assert os.getenv(_ENV_KEY) == expected_env
+    assert envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND is expected_native
+    if expect_prepare_call:
+        prepare_mock.assert_called_once()
+    else:
+        assert prepare_mock is None
 
 
 @pytest.mark.parametrize(

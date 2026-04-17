@@ -31,9 +31,62 @@ from atom.utils.forward_context import (
 logger = logging.getLogger(__name__)
 
 
+_atom_conv_cache_by_layer: dict[
+    tuple[int, int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor
+] = {}
+
+
 def _linear_attn_backend(attn_backend: Any) -> Any:
     """``HybridLinearAttnBackend`` wraps the GDN (``MambaAttnBackendBase``) instance."""
     return getattr(attn_backend, "linear_attn_backend", attn_backend)
+
+
+def _get_atom_conv_cache(pool: Any, layer_id: int, layer_cache: Any) -> torch.Tensor:
+    """Return a reusable ATOM-layout shadow cache for one SGLang GDN conv state.
+
+    SGLang stores the conv cache as row-major `[slot, D, W]`, while ATOM's
+    `causal_conv1d_*` kernels require the same logical shape with `stride(-2)==1`.
+    A per-forward layout fix would work but adds extra copies on every request.
+
+    To avoid that steady-state overhead, we keep one persistent shadow tensor in
+    the ATOM-preferred layout and reuse it across requests. Once created, this
+    shadow cache is exposed through the bridge as `KVCacheTensor.k_cache`, so
+    the attention backend can usually consume it directly without any per-request
+    row-major to ATOM-layout conversion.
+
+    The cache key is based on the long-lived pool object plus logical `layer_id`
+    and tensor spec, rather than `id(layer_cache)`. This matters because
+    `mamba2_layer_cache(layer_id)` may return a fresh frozen wrapper object on
+    each call, even though it still points to the same underlying runtime cache.
+    Keying by `id(layer_cache)` would therefore create one shadow tensor per
+    request and eventually leak VRAM under load, while `pool + layer_id`
+    preserves one reusable shadow tensor per actual layer cache.
+    """
+    raw = layer_cache.conv[0]
+    _, d, w = raw.shape
+    need_stride = (d * w, 1, d)
+    cache_key = (id(pool), layer_id, tuple(raw.shape), raw.dtype, raw.device)
+    shadow = _atom_conv_cache_by_layer.get(cache_key)
+    if (
+        shadow is None
+        or shadow.shape != raw.shape
+        or shadow.stride() != need_stride
+        or shadow.dtype != raw.dtype
+        or shadow.device != raw.device
+    ):
+        # Allocate once in ATOM layout, then reuse it for subsequent forwards.
+        shadow = torch.empty_strided(
+            raw.shape,
+            need_stride,
+            dtype=raw.dtype,
+            device=raw.device,
+        )
+        # Seed the shadow cache from the current SGLang cache contents. After
+        # this, the shadow cache is treated as the source of truth for ATOM's
+        # GDN path and is reused across requests.
+        shadow.copy_(raw)
+        _atom_conv_cache_by_layer[cache_key] = shadow
+    return shadow
 
 
 def kv_cache_tensors_from_mamba_pool(forward_batch: Any) -> Dict[str, KVCacheTensor]:
@@ -46,7 +99,7 @@ def kv_cache_tensors_from_mamba_pool(forward_batch: Any) -> Dict[str, KVCacheTen
     out: Dict[str, KVCacheTensor] = {}
     for layer_id in mamba_map:
         layer_cache = pool.mamba2_layer_cache(layer_id)
-        conv = layer_cache.conv[0]
+        conv = _get_atom_conv_cache(pool, layer_id, layer_cache)
         temporal = layer_cache.temporal
         out[f"layer_{layer_id}"] = KVCacheTensor(
             layer_num=layer_id,
