@@ -942,7 +942,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        **model_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
 
@@ -1067,7 +1066,6 @@ class Qwen3NextModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1081,9 +1079,7 @@ class Qwen3NextModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for layer in self.layers[self.start_layer : self.end_layer]:
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, **model_kwargs
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1128,7 +1124,6 @@ class Qwen3NextForCausalLM(nn.Module):
         super().__init__()
         config = atom_config.hf_config
         quant_config = atom_config.quant_config
-        self.atom_config = atom_config
         self.config = config
         self.quant_config = quant_config
         if self.quant_config.global_quant_config.quant_dtype == torch.bfloat16:
@@ -1164,17 +1159,9 @@ class Qwen3NextForCausalLM(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # SGLang OOT / cuda-graph capture passes forward_batch, get_embedding,
-        # pp_proxy_tensors, etc. RadixAttention (full_attention layers) requires
-        # forward_batch; thread kwargs through Qwen3NextModel -> DecoderLayer.
         hidden_states = self.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
-            **kwargs,
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return hidden_states
 

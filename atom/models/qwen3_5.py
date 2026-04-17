@@ -3,6 +3,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+
 from atom.config import QuantizationConfig, Config
 
 from atom.model_ops.topK import is_rocm_aiter_fusion_shared_expert_enabled
@@ -452,11 +453,7 @@ class Qwen3_5ForCausalLMBase(nn.Module):
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
-            **kwargs,
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
 
         return hidden_states
