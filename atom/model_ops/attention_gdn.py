@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
+from typing import TYPE_CHECKING
 from atom.model_ops.mamba_ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -20,24 +21,8 @@ from atom.utils.forward_context import ForwardContext, get_forward_context
 from torch import nn
 from aiter.dist.parallel_state import get_tp_group
 
-# Reused conv workspace for SGLang row-major mamba buffers (stable shape per server / cudagraph).
-_sglang_conv_work_cache: dict[tuple, torch.Tensor] = {}
-
-
-def _sglang_conv_work_tensor(raw: torch.Tensor) -> torch.Tensor:
-    key = (raw.shape, raw.dtype, raw.device)
-    n, d, w = raw.shape
-    need_stride = (d * w, 1, d)
-    t = _sglang_conv_work_cache.get(key)
-    if t is None or t.shape != raw.shape or t.stride() != need_stride:
-        t = torch.empty_strided(
-            (n, d, w),
-            need_stride,
-            dtype=raw.dtype,
-            device=raw.device,
-        )
-        _sglang_conv_work_cache[key] = t
-    return t
+if TYPE_CHECKING:
+    from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
 
 
 @triton.jit
@@ -165,6 +150,22 @@ class GatedDeltaNet(nn.Module):
         value = rearrange(value, "l (h d) -> 1 l h d", d=self.head_v_dim)
         return query.contiguous(), key.contiguous(), value.contiguous()
 
+    def _resolve_runtime_state(
+        self,
+        forward_context: ForwardContext,
+    ) -> tuple["GDNAttentionMetadata | None", torch.Tensor | None, torch.Tensor | None]:
+        """Resolve GDN metadata and cache tensors for the core ATOM path."""
+        from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
+
+        gdn_metadata: GDNAttentionMetadata = forward_context.attn_metadata.gdn_metadata
+        if gdn_metadata is None:
+            return None, None, None
+
+        gdn_cache = forward_context.kv_cache_data
+        conv_state = gdn_cache[f"layer_{self.layer_num}"].k_cache.transpose(-1, -2)
+        ssm_state = gdn_cache[f"layer_{self.layer_num}"].v_cache
+        return gdn_metadata, conv_state, ssm_state
+
     def forward(
         self,
         mixed_qkv: torch.Tensor,
@@ -174,32 +175,10 @@ class GatedDeltaNet(nn.Module):
         layer_name: str,
     ):
         fwd_ctx: ForwardContext = get_forward_context()
-        am = fwd_ctx.attn_metadata
-        # Default ForwardContext uses attn_metadata={}; vLLM path uses AttentionMetaData
-        # with a dynamically attached .gdn_metadata. SGLang OOT does not call
-        # set_forward_context yet, so am is often a dict — never use .gdn_metadata on it.
-        if isinstance(am, dict):
-            gdn_metadata = None
-        else:
-            gdn_metadata = getattr(am, "gdn_metadata", None)
-
+        gdn_metadata, conv_state, ssm_state = self._resolve_runtime_state(fwd_ctx)
         if gdn_metadata is None:
             return core_attn_out
-
-        gdn_cache = fwd_ctx.kv_cache_data
-        kv_entry = gdn_cache[f"layer_{self.layer_num}"]
-        raw_k = kv_entry.k_cache
-        ssm_state = kv_entry.v_cache
-        conv_layout = getattr(kv_entry, "mamba_conv_layout", "atom")
-        conv_sglang_copy_dst = None
-
-        if conv_layout == "sglang_rowmajor":
-            # SGLang: [slot, conv_dim, kernel-1] row-major; kernel needs stride(-2)==1 on [slot,D,W].
-            conv_state = _sglang_conv_work_tensor(raw_k)
-            conv_state.copy_(raw_k)
-            conv_sglang_copy_dst = raw_k
-        else:
-            conv_state = raw_k.transpose(-1, -2)
+        assert conv_state is not None and ssm_state is not None
 
         has_initial_state = gdn_metadata.has_initial_state
         spec_query_start_loc = gdn_metadata.spec_query_start_loc
@@ -398,8 +377,5 @@ class GatedDeltaNet(nn.Module):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-
-        if conv_sglang_copy_dst is not None:
-            conv_sglang_copy_dst.copy_(conv_state)
 
         return core_attn_out

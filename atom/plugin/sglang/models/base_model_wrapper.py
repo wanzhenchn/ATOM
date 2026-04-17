@@ -8,7 +8,7 @@ To add a new model, append its architecture class name to _MODEL_NAMES.
 
 import logging
 from contextvars import ContextVar
-from typing import Any, Iterable, Optional, Tuple, Union
+from typing import Any, Iterable, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -32,6 +32,33 @@ def get_current_forward_batch():
     return _current_forward_batch.get()
 
 
+def build_atom_model_for_sglang(
+    config: Any,
+    atom_model_cls: Type[nn.Module],
+) -> nn.Module:
+    """Build an ATOM model for SGLang without mutating ``atom.models`` symbols."""
+
+    from atom.plugin.config import generate_atom_config_for_plugin_mode
+    from atom.plugin.prepare import _set_framework_backbone
+    from atom.plugin.register import (
+        init_aiter_dist,
+        register_ops_to_sglang,
+        set_attn_cls,
+    )
+    from atom.plugin.sglang.utils.prepare_hooks import run_sglang_prepare_hooks
+
+    _set_framework_backbone("sglang")
+    atom_config = generate_atom_config_for_plugin_mode(config)
+    model_arch = getattr(config, "architectures", ["unknown"])[0]
+
+    run_sglang_prepare_hooks(model_arch, atom_config)
+    register_ops_to_sglang(atom_config=atom_config)
+    set_attn_cls()
+    init_aiter_dist(config=atom_config)
+
+    return atom_model_cls(atom_config=atom_config)
+
+
 _MODEL_NAMES = [
     "DeepseekV3ForCausalLM",
     "Qwen3MoeForCausalLM",
@@ -50,6 +77,8 @@ class _AtomCausalLMBaseForSglang(nn.Module):
     type that sglang expects.
     """
 
+    atom_model_cls: Type[nn.Module] | None = None
+
     def __init__(
         self,
         config,
@@ -65,14 +94,18 @@ class _AtomCausalLMBaseForSglang(nn.Module):
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
-        import atom
+        if self.atom_model_cls is None:
+            import atom
 
-        # TODO: prepare_model() currently handles model construction, config
-        # generation, attention backend registration, and distributed init.
-        # Refactor so this wrapper only dispatches the attention backend
-        # (register_ops_to_sglang + set_attn_cls), and let sglang handle
-        # model construction directly
-        self.model = atom.prepare_model(config=config, engine="sglang")
+            # TODO: prepare_model() currently handles model construction, config
+            # generation, attention backend registration, and distributed init.
+            # Refactor so this wrapper only dispatches the attention backend
+            # (register_ops_to_sglang + set_attn_cls), and let sglang handle
+            # model construction directly
+            self.model = atom.prepare_model(config=config, engine="sglang")
+        else:
+            self.model = build_atom_model_for_sglang(config, self.atom_model_cls)
+
         if self.model is None:
             model_arch = getattr(config, "architectures", ["unknown"])[0]
             raise ValueError(
@@ -138,11 +171,20 @@ class _AtomCausalLMBaseForSglang(nn.Module):
         # uses its own weight loading pipeline (handling AITER-specific quant
         # formats, kv_b_proj splitting, etc.) that is incompatible with
         # sglang's default weight iterator.
-        from atom.model_loader.loader import load_model_in_plugin_mode
+        if self.atom_model_cls is None:
+            from atom.model_loader.loader import load_model_in_plugin_mode
 
-        return load_model_in_plugin_mode(
-            model=self.model, config=self.model.atom_config, prefix="model."
-        )
+            return load_model_in_plugin_mode(
+                model=self.model, config=self.model.atom_config, prefix="model."
+            )
+        else:
+            from atom.plugin.sglang.utils.loader import (
+                load_model_in_sglang_plugin_mode,
+            )
+
+            return load_model_in_sglang_plugin_mode(
+                model=self.model, config=self.model.atom_config, prefix="model."
+            )
 
 
 EntryClass = []

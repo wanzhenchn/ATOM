@@ -4,7 +4,7 @@
 """Prepare-time hooks for SGLang plugin mode.
 
 ``atom.plugin.prepare.prepare_model`` calls :func:`run_sglang_prepare_hooks` only.
-Built-in handlers (Qwen3.5 / Qwen3-next model swaps and config tweaks) are
+Built-in handlers (Qwen3.5 config tweaks and Qwen-only env defaults) are
 registered when this module is imported. For those arches only, the built-in
 hook also defaults ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND`` so
 ``register_ops_to_sglang`` sees native ``AiterAttnBackend`` unless the user set
@@ -33,19 +33,13 @@ def run_sglang_prepare_hooks(model_arch: str, atom_config: Any) -> None:
 
 
 def _qwen3_prepare_hook(model_arch: str, atom_config: Any) -> None:
-    """Default Qwen3.5 / Qwen3-next SGLang prepare logic (lazy-imports model modules)."""
+    """Default Qwen3.5 / Qwen3-next SGLang prepare logic."""
     if model_arch.startswith("Qwen3_5") or model_arch == "Qwen3NextForCausalLM":
         os.environ.setdefault("ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND", "1")
     if model_arch.startswith("Qwen3_5"):
         from atom.plugin.sglang.models.qwen3_5 import apply_prepare_model_adaptations
 
         apply_prepare_model_adaptations(atom_config, model_arch)
-    elif model_arch == "Qwen3NextForCausalLM":
-        from atom.plugin.sglang.models.qwen3_next import (
-            apply_qwen3_next_sglang_model_patch,
-        )
-
-        apply_qwen3_next_sglang_model_patch()
 
 
 register_sglang_prepare_hook(_qwen3_prepare_hook)
