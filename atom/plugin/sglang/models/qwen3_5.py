@@ -15,11 +15,13 @@ plugin-local ATOM subclasses prepared for SGLang.
 
 - On HIP, SGLang's ``Qwen3_5ForCausalLM.load_weights`` applies
   ``qwen3_5_gdn_fused_proj.FUSED_PROJ_WEIGHT_MAPPING`` before stacked QKV/MLP
-  mapping. ATOM GDN uses ``in_proj_qkvz`` / ``in_proj_ba`` only; the subset of
-  that table for ``in_proj_qkv*`` / ``in_proj_z`` / ``in_proj_b`` /
-  ``in_proj_a`` is already covered by ``_QWEN35_OOT_PACKED_MODULES_MAPPING``.
-  Checkpoints that expose a single ``in_proj_fused`` tensor (full BF16 fusion)
-  are not supported here—use HF-style split projection keys.
+  mapping. ATOM GDN keeps two parameter layouts: BF16 builds one 6-way
+  ``in_proj_qkvzba``, while FP8 / non-BF16 keep ``in_proj_qkvz`` /
+  ``in_proj_ba``. ``_apply_bf16_in_proj_mapping()`` remaps the checkpoint's
+  split keys (``in_proj_qkv`` / ``in_proj_z`` / ``in_proj_b`` /
+  ``in_proj_a``) onto the actual layout. Checkpoints that expose a single
+  ``in_proj_fused`` tensor are still unsupported here—use HF-style split
+  projection keys.
 
 - MoE fused expert slabs: SGLang chunks ``gate_up_proj`` on ``dim=-2``; this
   module uses ``load_fused_expert_weights`` with orientation detection so both
@@ -113,6 +115,29 @@ _QWEN35_OOT_PACKED_MODULES_MAPPING = {
     "shared_expert_gate": ("gate", 1),
 }
 
+
+def _apply_bf16_in_proj_mapping(mapping: dict, atom_config: Any) -> dict:
+    """Mirror ``Qwen3_5GatedDeltaNet.create_qkvzba_proj`` for BF16 GDN fusion.
+
+    BF16 fuses q/k/v/z/b/a into one 6-way ``in_proj_qkvzba`` tensor, so the
+    checkpoint's split keys (``in_proj_qkv`` / ``in_proj_z`` / ``in_proj_b`` /
+    ``in_proj_a``) must be routed there. Non-BF16 keeps the default 2-way
+    ``in_proj_qkvz`` / ``in_proj_ba`` layout from
+    ``_QWEN35_OOT_PACKED_MODULES_MAPPING``.
+    """
+    if atom_config.quant_config.global_quant_config.quant_dtype != torch.bfloat16:
+        return mapping
+
+    mapping.pop("in_proj_qkvz", None)
+    mapping.pop("in_proj_ba", None)
+    mapping["in_proj_qkvzba"] = ("in_proj_qkvzba", None)
+    mapping["in_proj_qkv"] = ("in_proj_qkvzba", (0, 1, 2))
+    mapping["in_proj_z"] = ("in_proj_qkvzba", 3)
+    mapping["in_proj_b"] = ("in_proj_qkvzba", 4)
+    mapping["in_proj_a"] = ("in_proj_qkvzba", 5)
+    return mapping
+
+
 _QWEN35_SGLANG_VL_HF_MAPPER = WeightsMapper(
     orig_to_new_substr={
         "attn.qkv.": "attn.qkv_proj.",
@@ -149,7 +174,9 @@ def remap_qwen35_quant_config_for_sglang_plugin(atom_config: Any) -> None:
     """
     atom_config.quant_config.remap_layer_name(
         atom_config.hf_config,
-        packed_modules_mapping=dict(_QWEN35_OOT_PACKED_MODULES_MAPPING),
+        packed_modules_mapping=_apply_bf16_in_proj_mapping(
+            dict(_QWEN35_OOT_PACKED_MODULES_MAPPING), atom_config
+        ),
         weights_mapper=_QWEN35_SGLANG_VL_HF_MAPPER,
     )
 
@@ -535,6 +562,9 @@ class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
+        self.packed_modules_mapping = _apply_bf16_in_proj_mapping(
+            dict(_QWEN35_OOT_PACKED_MODULES_MAPPING), self.atom_config
+        )
         if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
@@ -569,6 +599,9 @@ class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
         finally:
             _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
         self.atom_config = self.model.atom_config
+        self.packed_modules_mapping = _apply_bf16_in_proj_mapping(
+            dict(_QWEN35_OOT_PACKED_MODULES_MAPPING), self.atom_config
+        )
         if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = self.packed_modules_mapping
         logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
