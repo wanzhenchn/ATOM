@@ -12,7 +12,7 @@ from atom.utils.forward_context import ForwardContext
 class GatedDeltaNet(AtomGatedDeltaNet):
     """SGLang adapter over the shared ATOM GDN implementation."""
 
-    def _resolve_runtime_state(
+    def _get_gdn_runtime_state_from_context(
         self,
         forward_context: ForwardContext,
     ) -> tuple[GDNAttentionMetadata | None, torch.Tensor | None, torch.Tensor | None]:
@@ -20,8 +20,8 @@ class GatedDeltaNet(AtomGatedDeltaNet):
         if attn_metadata is None:
             return None, None, None
 
-        # SGLang bridge path: `kv_cache_data[layer_{i}]` already points at the
-        # persistent shadow cache allocated in `gdn_forward_helper`, so there should
+        # SGLang forward-context path: `kv_cache_data[layer_{i}]` already points at the
+        # persistent shadow cache allocated in `gdn_context`, so there should
         # be no per-request layout conversion left here.
         gdn_metadata = getattr(attn_metadata, "gdn_metadata", None)
         if gdn_metadata is None:

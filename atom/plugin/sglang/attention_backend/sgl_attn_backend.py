@@ -11,6 +11,7 @@ from __future__ import annotations
 # be handled by ATOM's native backend, making sglang-specific overrides
 # unnecessary.
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -23,6 +24,8 @@ from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.utils import get_bool_env_var
+
+logger = logging.getLogger("atom.plugin.sglang.attention_backend")
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -267,7 +270,7 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
         self.pa_metadata_buffers = None
 
         k_buffer, _ = model_runner.token_to_kv_pool.get_kv_buffer(first_full_attn_id)
-        num_slots, num_kv_heads, _ = k_buffer.shape
+        num_slots, num_kv_heads, head_size = k_buffer.shape
         block_size = self.page_size
         num_blocks = num_slots // block_size
         max_total_tokens = num_blocks * block_size
@@ -278,6 +281,13 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
             num_kv_heads, max_total_tokens, dtype=torch.float32, device=self.device
         )
         self.decode_using_pa_ps = self.page_size == 1024
+        self.supports_custom_mha_decode = self.use_mla or head_size == 128
+        if not self.use_mla and not self.supports_custom_mha_decode:
+            logger.info(
+                "Disable custom ATOM MHA decode kernel: unsupported head_size=%s; "
+                "falling back to upstream AiterAttnBackend.forward_decode.",
+                head_size,
+            )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init auxiliary variables for triton attention backend."""
@@ -828,6 +838,23 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
             num_kv_splits=num_kv_splits,
         )
 
+    def _build_cuda_graph_decode_kv_metadata(self, bs, req_pool_indices, seq_lens):
+        """Build decode ragged metadata required by the upstream AiterAttnBackend.forward_decode fallback path."""
+        kv_indptr = self.kv_indptr
+        kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
+        kv_indptr = kv_indptr[: bs + 1]
+        kv_indices = self.cuda_graph_kv_indices
+        create_flashinfer_kv_indices_triton[(bs,)](
+            self.req_to_token,
+            req_pool_indices,
+            seq_lens,
+            kv_indptr,
+            None,
+            kv_indices,
+            self.req_to_token.stride(0),
+        )
+        return kv_indptr, kv_indices
+
     def init_forward_metadata_capture_cuda_graph(
         self,
         bs: int,
@@ -844,12 +871,15 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
         if self.use_mla:
             self._init_mla_cuda_graph_metadata(bs, req_pool_indices, seq_lens)
         else:
+            kv_indptr, kv_indices = self._build_cuda_graph_decode_kv_metadata(
+                bs, req_pool_indices, seq_lens
+            )
             page_table = self.page_table[:bs, :]
             self.seq_lens[:bs].copy_(seq_lens, non_blocking=True)
             seq_lens_persistent = self.seq_lens[:bs]
             self.forward_metadata = ForwardMetadata(
-                None,
-                None,
+                kv_indptr,
+                kv_indices,
                 None,
                 None,
                 1,
@@ -878,6 +908,9 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
         if self.use_mla:
             self._init_mla_cuda_graph_metadata(bs, req_pool_indices, seq_lens)
         else:
+            kv_indptr, kv_indices = self._build_cuda_graph_decode_kv_metadata(
+                bs, req_pool_indices, seq_lens
+            )
             page_table_persistent = self.page_table
             seq_lens_persistent = self.seq_lens
             seq_lens_persistent.fill_(0)
@@ -895,8 +928,8 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
             )
 
             self.forward_metadata = ForwardMetadata(
-                None,
-                None,
+                kv_indptr,
+                kv_indices,
                 None,
                 None,
                 1,
@@ -1374,6 +1407,16 @@ class ATOMAttnBackendForSgl(AiterAttnBackend):
         forward_batch: ForwardBatch,
         save_kv_cache=True,
     ):
+        if not self.use_mla and not self.supports_custom_mha_decode:
+            return super().forward_decode(
+                q,
+                k,
+                v,
+                layer,
+                forward_batch,
+                save_kv_cache=save_kv_cache,
+            )
+
         q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
         batch_size = q.shape[0]
         head_dim_out = (

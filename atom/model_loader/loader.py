@@ -367,10 +367,7 @@ def load_model(
                                 weight_loader = getattr(param, "weight_loader")
                                 futures.append(
                                     executor.submit(
-                                        weight_loader,
-                                        param,
-                                        weight_tensor,
-                                        shard_idx,
+                                        weight_loader, param, weight_tensor, shard_idx
                                     )
                                 )
                                 loaded_weights_record.add(prefix + param_name)

@@ -3,7 +3,10 @@ import logging
 from atom.models.qwen3 import Qwen3ForCausalLM
 from atom.models.qwen3_moe import Qwen3MoeForCausalLM
 from atom.models.qwen3_next import Qwen3NextForCausalLM
-from atom.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM
+from atom.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+)
 from atom.models.glm4_moe import Glm4MoeForCausalLM
 from atom.models.deepseek_v2 import DeepseekV3ForCausalLM
 from atom.config import Config
@@ -16,8 +19,8 @@ _ATOM_SUPPORTED_MODELS = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
     "Qwen3MoeForCausalLM": Qwen3MoeForCausalLM,
     "Qwen3NextForCausalLM": Qwen3NextForCausalLM,
-    "Qwen3_5ForConditionalGeneration": Qwen3_5ForCausalLM,
-    "Qwen3_5MoeForConditionalGeneration": Qwen3_5MoeForCausalLM,
+    "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGeneration,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5MoeForConditionalGeneration,
     "Glm4MoeForCausalLM": Glm4MoeForCausalLM,
     "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
 }
@@ -51,16 +54,15 @@ def register_ops_to_sglang(atom_config: Config) -> None:
     """
     Register custom ops to sglang, including attention.
 
-    Set ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1`` to keep SGLang's built-in
-    ``AiterAttnBackend`` instead of ``ATOMAttnBackendForSgl`` (see PR #355).
-    The built-in Qwen prepare hook (``Qwen3_5*`` / ``Qwen3NextForCausalLM``)
-    defaults this to ``1`` unless already set in the environment; other arches
-    do not.
+    ``Qwen3_5*`` and ``Qwen3NextForCausalLM`` keep upstream SGLang's native
+    ``AiterAttnBackend`` by default (same behavior as PR #532). This can also
+    be forced explicitly by setting
+    ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1``.
     """
     if envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND:
         logger.info(
-            "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1: skipping custom 'aiter' backend "
-            "ATOMAttnBackendForSgl registration; SGLang will use its built-in AiterAttnBackend."
+            "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1: keep upstream "
+            "AiterAttnBackend and skip ATOMAttnBackendForSgl registration"
         )
     else:
         _register_custom_attention_to_sglang()

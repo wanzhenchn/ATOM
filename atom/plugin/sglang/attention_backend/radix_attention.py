@@ -16,6 +16,7 @@ from atom.model_ops.attention_mla import MLAModules
 from atom.model_ops.base_attention import BaseAttention
 from atom.model_ops.utils import atom_parameter
 from atom.plugin.prepare import is_plugin_mode, is_sglang
+from atom.plugin.sglang.utils.forward_context import SGLangForwardBatchMetadata
 from atom.models.utils import maybe_prefix
 
 
@@ -120,11 +121,21 @@ class RadixAttention(BaseAttention):
         if is_sglang():
             # for sglang, forward_batch is required
             forward_batch = kwargs.get("forward_batch", None)
+            forward_metadata = SGLangForwardBatchMetadata.current()
+            if forward_batch is None and forward_metadata is not None:
+                forward_batch = forward_metadata.forward_batch
             # save_kv_cache is explicitly set by the caller:
             # - True (default): the attention backend writes KV to cache
             # - False: when fused rope+qknorm kernel already wrote KV to cache,
             #   skipping the redundant write here
-            save_kv_cache = kwargs.get("save_kv_cache", True)
+            save_kv_cache = kwargs.get(
+                "save_kv_cache",
+                (
+                    forward_metadata.save_kv_cache
+                    if forward_metadata is not None
+                    else True
+                ),
+            )
             assert forward_batch is not None, "forward_batch is required for sglang"
 
             # sglang's RadixAttention does not apply rope internally.

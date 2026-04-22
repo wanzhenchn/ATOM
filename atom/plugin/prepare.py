@@ -1,5 +1,6 @@
 from typing import Any
 import logging
+import os
 
 logger = logging.getLogger("atom")
 
@@ -59,27 +60,24 @@ def prepare_model(config: Any, engine: str):
         init_aiter_dist,
         set_attn_cls,
     )
+    from atom.plugin.config import generate_atom_config_for_plugin_mode
 
-    if model_arch not in _ATOM_SUPPORTED_MODELS:
+    model_cls = _ATOM_SUPPORTED_MODELS.get(model_arch)
+    if model_cls is None:
         supported_archs = list(_ATOM_SUPPORTED_MODELS.keys())
         raise ValueError(
             f"ATOM does not support the required model architecture: {model_arch}. "
             f"For now supported model architectures: {supported_archs}"
         )
-
-    from atom.plugin.config import generate_atom_config_for_plugin_mode
-
-    atom_config = generate_atom_config_for_plugin_mode(config)
-
-    model_cls = _ATOM_SUPPORTED_MODELS[model_arch]
     logger.info(f"ATOM model class for {model_arch} is {model_cls}")
 
-    if is_sglang():
-        from atom.plugin.sglang.utils.prepare_hooks import run_sglang_prepare_hooks
+    # Set ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND=1`` to keep SGLang's built-in
+    # ``AiterAttnBackend`` instead of ``ATOMAttnBackendForSgl`` (see PR #355).
+    if model_arch.startswith("Qwen3_5") or model_arch == "Qwen3NextForCausalLM":
+        os.environ.setdefault("ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND", "1")
 
-        run_sglang_prepare_hooks(model_arch, atom_config)
-        register_ops_to_sglang(atom_config=atom_config)
-
+    atom_config = generate_atom_config_for_plugin_mode(config)
+    register_ops_to_sglang(atom_config=atom_config)
     set_attn_cls()
 
     # init aiter dist for using aiter custom collective ops
@@ -88,9 +86,19 @@ def prepare_model(config: Any, engine: str):
     # Patch SGLang graph_capture to also enter aiter's ca_comm.capture(),
     # avoiding hipMemcpyAsync in aiter collectives when model uses aiter's
     # custom all_reduce (same fix as atom/plugin/vllm/graph_capture_patch.py)
-    if is_sglang():
-        from atom.plugin.sglang.graph_capture_patch import apply_graph_capture_patch
+    from atom.plugin.sglang.graph_capture_patch import apply_graph_capture_patch
 
-        apply_graph_capture_patch()
+    apply_graph_capture_patch()
 
-    return model_cls(atom_config=atom_config)
+    try:
+        model = model_cls(atom_config=atom_config)
+    except TypeError as exc:
+        # Some SGLang plugin models keep SGLang's native wrapper constructor
+        # and only swap their internal language_model with an ATOM model.
+        # Those classes accept `config=...` instead of `atom_config=...`.
+        if "atom_config" not in str(exc):
+            raise
+        model = model_cls(config=config)
+    if not hasattr(model, "atom_config"):
+        model.atom_config = atom_config
+    return model

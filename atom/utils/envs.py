@@ -83,9 +83,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "ATOM_DISABLE_VLLM_PLUGIN_ATTENTION", "0"
     ).lower()
     == "1",
-    # SGLang OOT (PR #355): when True, do not override ATTENTION_BACKENDS["aiter"]
-    # with ATOMAttnBackendForSgl — use upstream sglang AiterAttnBackend instead.
-    # Use if the custom backend causes crashes (e.g. high-concurrency decode + prefill).
+    # SGLang plugin (PR #355 / #532): when True, do not override
+    # ATTENTION_BACKENDS["aiter"] with ATOMAttnBackendForSgl and keep
+    # upstream SGLang's native AiterAttnBackend instead.
     "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND": lambda: os.getenv(
         "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND", "0"
     ).lower()

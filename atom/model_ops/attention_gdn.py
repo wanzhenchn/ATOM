@@ -150,11 +150,11 @@ class GatedDeltaNet(nn.Module):
         value = rearrange(value, "l (h d) -> 1 l h d", d=self.head_v_dim)
         return query.contiguous(), key.contiguous(), value.contiguous()
 
-    def _resolve_runtime_state(
+    def _get_gdn_runtime_state_from_context(
         self,
         forward_context: ForwardContext,
     ) -> tuple["GDNAttentionMetadata | None", torch.Tensor | None, torch.Tensor | None]:
-        """Resolve GDN metadata and cache tensors for the core ATOM path."""
+        """Read GDN metadata and cache tensors from the current forward context."""
         from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
 
         gdn_metadata: GDNAttentionMetadata = forward_context.attn_metadata.gdn_metadata
@@ -175,7 +175,9 @@ class GatedDeltaNet(nn.Module):
         layer_name: str,
     ):
         fwd_ctx: ForwardContext = get_forward_context()
-        gdn_metadata, conv_state, ssm_state = self._resolve_runtime_state(fwd_ctx)
+        gdn_metadata, conv_state, ssm_state = self._get_gdn_runtime_state_from_context(
+            fwd_ctx
+        )
         if gdn_metadata is None:
             return core_attn_out
         assert conv_state is not None and ssm_state is not None
