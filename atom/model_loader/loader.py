@@ -6,7 +6,7 @@ import os
 import logging
 import re
 from glob import glob
-from typing import Callable, Generator, Tuple
+from typing import Generator, Tuple
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -115,11 +115,6 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight.view(-1)[tp_rank_start:tp_rank_end])
 
 
-def packed_mapping_key_matches_weight_name(weight_name: str, key: str) -> bool:
-    """Return whether a packed-module mapping key should match a weight name."""
-    return key in weight_name
-
-
 def safetensors_weights_iterator(
     model_name_or_path: str,
     disable_mmap: bool = False,
@@ -181,7 +176,6 @@ def load_model_in_plugin_mode(
     prefix: str = "",
     weights_mapper: WeightsMapper | None = None,
     load_fused_expert_weights_fn=None,
-    packed_mapping_key_matcher: Callable[[str, str], bool] | None = None,
 ) -> set[str]:
 
     # during loading model, the outplace operation may consume more
@@ -217,7 +211,6 @@ def load_model_in_plugin_mode(
         is_plugin_mode=True,
         weights_mapper=weights_mapper,
         load_fused_expert_weights_fn=load_fused_expert_weights_fn,
-        packed_mapping_key_matcher=packed_mapping_key_matcher,
     )
     _empty_cache()
     return loaded_weights_record
@@ -233,11 +226,7 @@ def load_model(
     is_plugin_mode: bool = False,
     weights_mapper: WeightsMapper | None = None,
     load_fused_expert_weights_fn=None,
-    packed_mapping_key_matcher: Callable[[str, str], bool] | None = None,
 ):
-    if packed_mapping_key_matcher is None:
-        packed_mapping_key_matcher = packed_mapping_key_matches_weight_name
-
     def have_shared_expert(name):
         maybe_matching_list = ["mlp.shared_experts.", "mlp.shared_expert."]
         for maybe_matching_name in maybe_matching_list:
@@ -352,7 +341,7 @@ def load_model(
                 # We handle the experts below in expert_params_mapping
                 if "mlp.experts." in name and name not in params_dict:
                     continue
-                if packed_mapping_key_matcher(name, k):
+                if k in name:
                     packed_value = packed_modules_mapping[k]
                     # Handle both tuple (fuse parameter) and list (shard parameter)
                     if isinstance(packed_value, list):
@@ -367,10 +356,7 @@ def load_model(
                                 weight_loader = getattr(param, "weight_loader")
                                 futures.append(
                                     executor.submit(
-                                        weight_loader,
-                                        param,
-                                        weight_tensor,
-                                        shard_idx,
+                                        weight_loader, param, weight_tensor, shard_idx
                                     )
                                 )
                                 loaded_weights_record.add(prefix + param_name)

@@ -6,7 +6,6 @@ import torch
 import triton
 import triton.language as tl
 from einops import rearrange
-from typing import TYPE_CHECKING
 from atom.model_ops.mamba_ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -21,8 +20,35 @@ from atom.utils.forward_context import ForwardContext, get_forward_context
 from torch import nn
 from aiter.dist.parallel_state import get_tp_group
 
-if TYPE_CHECKING:
-    from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
+# Reused conv workspace for SGLang row-major mamba buffers.
+# Keep at most one cached workspace per (device, dtype), and avoid promoting
+# larger burst-shaped allocations into the global cache. This keeps a steady
+# reusable buffer for common traffic patterns without pinning a very large
+# tensor after a transient spike.
+_sglang_conv_work_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
+
+def _sglang_conv_work_tensor(raw: torch.Tensor) -> torch.Tensor:
+    key = (raw.device, raw.dtype)
+    n, d, w = raw.shape
+    need_stride = (d * w, 1, d)
+    cached = _sglang_conv_work_cache.get(key)
+    if (
+        cached is not None
+        and cached.shape == raw.shape
+        and cached.stride() == need_stride
+    ):
+        return cached
+
+    t = torch.empty_strided(
+        (n, d, w),
+        need_stride,
+        dtype=raw.dtype,
+        device=raw.device,
+    )
+    if cached is None or t.numel() <= cached.numel():
+        _sglang_conv_work_cache[key] = t
+    return t
 
 
 @triton.jit
@@ -150,22 +176,6 @@ class GatedDeltaNet(nn.Module):
         value = rearrange(value, "l (h d) -> 1 l h d", d=self.head_v_dim)
         return query.contiguous(), key.contiguous(), value.contiguous()
 
-    def _resolve_runtime_state(
-        self,
-        forward_context: ForwardContext,
-    ) -> tuple["GDNAttentionMetadata | None", torch.Tensor | None, torch.Tensor | None]:
-        """Resolve GDN metadata and cache tensors for the core ATOM path."""
-        from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
-
-        gdn_metadata: GDNAttentionMetadata = forward_context.attn_metadata.gdn_metadata
-        if gdn_metadata is None:
-            return None, None, None
-
-        gdn_cache = forward_context.kv_cache_data
-        conv_state = gdn_cache[f"layer_{self.layer_num}"].k_cache.transpose(-1, -2)
-        ssm_state = gdn_cache[f"layer_{self.layer_num}"].v_cache
-        return gdn_metadata, conv_state, ssm_state
-
     def forward(
         self,
         mixed_qkv: torch.Tensor,
@@ -174,11 +184,32 @@ class GatedDeltaNet(nn.Module):
         core_attn_out: torch.Tensor,
         layer_name: str,
     ):
+        from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
+
         fwd_ctx: ForwardContext = get_forward_context()
-        gdn_metadata, conv_state, ssm_state = self._resolve_runtime_state(fwd_ctx)
+        am = fwd_ctx.attn_metadata
+        if isinstance(am, dict):
+            return core_attn_out
+        else:
+            gdn_metadata: GDNAttentionMetadata = getattr(am, "gdn_metadata", None)
         if gdn_metadata is None:
             return core_attn_out
-        assert conv_state is not None and ssm_state is not None
+
+        gdn_cache = fwd_ctx.kv_cache_data
+        kv_entry = gdn_cache[f"layer_{self.layer_num}"]
+        conv_state = kv_entry.k_cache
+        ssm_state = kv_entry.v_cache
+        conv_layout = getattr(kv_entry, "mamba_conv_layout", "atom")
+        conv_sglang_copy_dst = None
+
+        if conv_layout == "sglang_rowmajor":
+            # SGLang stores conv cache as [slot, conv_dim, kernel-1] row-major,
+            # while the ATOM kernel expects stride(-2)==1 on [slot, D, W].
+            conv_sglang_copy_dst = conv_state
+            conv_state = _sglang_conv_work_tensor(conv_state)
+            conv_state.copy_(conv_sglang_copy_dst)
+        else:
+            conv_state = conv_state.transpose(-1, -2)
 
         has_initial_state = gdn_metadata.has_initial_state
         spec_query_start_loc = gdn_metadata.spec_query_start_loc
@@ -377,5 +408,8 @@ class GatedDeltaNet(nn.Module):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
+        if conv_sglang_copy_dst is not None:
+            conv_sglang_copy_dst.copy_(conv_state)
 
         return core_attn_out

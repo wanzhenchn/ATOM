@@ -55,6 +55,8 @@ def get_attn_backend_cls(block_size, use_mla, use_gdn, use_sglang, use_vllm) -> 
         if use_vllm:
             return "atom.plugin.vllm.attention_backend.gdn_attn.GDNAttentionBackend"
         if use_sglang:
-            return "atom.plugin.sglang.attention_backend.gdn_attn.GDNAttentionBackend"
+            return (
+                "atom.plugin.sglang.attention_backend.attention_gdn.GDNAttentionBackend"
+            )
         return "atom.model_ops.attentions.gdn_attn.GDNAttentionBackend"
     return "atom.model_ops.attentions.aiter_attention.AiterBackend"  # noqa: E501
