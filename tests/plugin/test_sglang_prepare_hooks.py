@@ -1,134 +1,110 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
-"""SGLang prepare hooks: native-aiter env default (Qwen3.5 / Qwen3-next only) and
-the ``register_ops_to_sglang`` env gate (PR #355). Qwen modules are stubbed in
-``sys.modules``; register gate mirrors ``atom.plugin.register`` without importing it."""
+"""Tests for SGLang prepare/register gating behavior."""
 
 from __future__ import annotations
 
-import os
 import sys
-import types
-from contextlib import contextmanager, nullcontext
-from typing import Any
-from unittest.mock import MagicMock
+from types import ModuleType
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atom.plugin.sglang.utils import prepare_hooks
-from atom.plugin.sglang.utils.prepare_hooks import run_sglang_prepare_hooks
-from atom.utils import envs
-
-_ENV_KEY = "ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND"
+from atom.plugin import prepare as plugin_prepare
 
 
-@contextmanager
-def _stub_qwen35_prepare_module():
-    q35 = types.ModuleType("atom.plugin.sglang.models.qwen3_5")
-    q35.apply_prepare_model_adaptations = MagicMock()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "atom.plugin.sglang.models.qwen3_5", q35)
-        yield q35.apply_prepare_model_adaptations
+class _Obj:
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
-def _register_ops_gate(_atom_config: Any, register_custom: MagicMock) -> None:
-    """Same branch as ``register_ops_to_sglang`` in ``atom.plugin.register``."""
-    if envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND:
-        return
-    register_custom()
+def _make_fake_register_module(model_arch: str):
+    fake_model = MagicMock()
+    fake_model.atom_config = None
+    fake_model_cls = MagicMock(return_value=fake_model)
+    fake_register = MagicMock()
+    fake_register._ATOM_SUPPORTED_MODELS = {model_arch: fake_model_cls}
+    fake_register._SGLANG_NATIVE_ATTN_MODEL_ARCHS = {
+        "Qwen3NextForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+    fake_register.register_ops_to_sglang = MagicMock()
+    fake_register.init_aiter_dist = MagicMock()
+    fake_register.set_attn_cls = MagicMock()
+    return fake_register, fake_model, fake_model_cls
+
+
+def _module(name: str, **attrs) -> ModuleType:
+    module = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
 
 
 @pytest.fixture(autouse=True)
-def _clear_native_aiter_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv(_ENV_KEY, raising=False)
+def _reset_framework_state():
+    plugin_prepare._set_framework_backbone("atom")
     yield
-    monkeypatch.delenv(_ENV_KEY, raising=False)
+    plugin_prepare._set_framework_backbone("atom")
 
 
 @pytest.mark.parametrize(
-    "model_arch,preset,expected_env,expected_native,expect_prepare_call",
+    "model_arch,expect_register_ops",
     (
-        ("Qwen3_5ForCausalLM", None, "1", True, True),
-        ("Qwen3NextForCausalLM", None, "1", True, False),
-        ("DeepseekV3ForCausalLM", None, None, False, False),
-        ("Qwen3ForCausalLM", None, None, False, False),
-        ("Qwen3_5ForCausalLM", "0", "0", False, True),
-        ("Qwen3_5ForCausalLM", "1", "1", True, True),
+        ("Qwen3_5ForConditionalGeneration", False),
+        ("Qwen3_5MoeForConditionalGeneration", False),
+        ("Qwen3NextForCausalLM", False),
+        ("DeepseekV3ForCausalLM", True),
+        ("Qwen3MoeForCausalLM", True),
     ),
 )
-def test_prepare_hooks_native_aiter_env_behavior(
-    monkeypatch: pytest.MonkeyPatch,
+def test_prepare_model_register_ops_gate(
     model_arch: str,
-    preset: str | None,
-    expected_env: str | None,
-    expected_native: bool,
-    expect_prepare_call: bool,
+    expect_register_ops: bool,
 ):
-    if preset is None:
-        monkeypatch.delenv(_ENV_KEY, raising=False)
-    else:
-        monkeypatch.setenv(_ENV_KEY, preset)
-
-    ctx = (
-        _stub_qwen35_prepare_module()
-        if model_arch.startswith("Qwen3_5")
-        else nullcontext()
+    fake_atom_config = _Obj(plugin_config=_Obj(is_plugin_mode=True))
+    fake_register, _fake_model, fake_model_cls = _make_fake_register_module(model_arch)
+    fake_config_mod = MagicMock()
+    fake_config_mod.generate_atom_config_for_plugin_mode = MagicMock(
+        return_value=fake_atom_config
     )
-    with ctx as prepare_mock:
-        run_sglang_prepare_hooks(model_arch, MagicMock())
+    fake_qwen35_mod = _module(
+        "atom.plugin.sglang.models.qwen3_5",
+        apply_prepare_model_adaptations=MagicMock(),
+    )
 
-    assert os.getenv(_ENV_KEY) == expected_env
-    assert envs.ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND is expected_native
-    if expect_prepare_call:
-        prepare_mock.assert_called_once()
+    with patch.dict(
+        sys.modules,
+        {
+            "atom.plugin.register": fake_register,
+            "atom.plugin.config": fake_config_mod,
+            "atom.plugin.sglang.models.qwen3_5": fake_qwen35_mod,
+            "atom.plugin.sglang.graph_capture_patch": MagicMock(
+                apply_graph_capture_patch=MagicMock()
+            ),
+        },
+    ):
+        plugin_prepare.prepare_model(
+            config=_Obj(architectures=[model_arch]),
+            engine="sglang",
+        )
+
+    if expect_register_ops:
+        fake_register.register_ops_to_sglang.assert_called_once_with(
+            atom_config=fake_atom_config
+        )
     else:
-        assert prepare_mock is None
-
-
-@pytest.mark.parametrize(
-    "env_setup,expect_custom_registered",
-    (
-        ("native", False),
-        ("unset", True),
-        ("zero", True),
-    ),
-)
-def test_register_ops_env_gate(
-    monkeypatch: pytest.MonkeyPatch, env_setup: str, expect_custom_registered: bool
-):
-    if env_setup == "native":
-        monkeypatch.setenv(_ENV_KEY, "1")
-    elif env_setup == "unset":
-        monkeypatch.delenv(_ENV_KEY, raising=False)
+        fake_register.register_ops_to_sglang.assert_not_called()
+    if model_arch in {
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }:
+        fake_qwen35_mod.apply_prepare_model_adaptations.assert_called_once_with(
+            fake_atom_config, model_arch
+        )
     else:
-        monkeypatch.setenv(_ENV_KEY, "0")
-    reg = MagicMock()
-    _register_ops_gate(MagicMock(), reg)
-    if expect_custom_registered:
-        reg.assert_called_once()
-    else:
-        reg.assert_not_called()
-
-
-def test_register_sglang_prepare_hook_no_duplicate_entries():
-    calls: list[str] = []
-
-    def hook_a(_m: str, _c: object) -> None:
-        calls.append("a")
-
-    def hook_b(_m: str, _c: object) -> None:
-        calls.append("b")
-
-    n0 = len(prepare_hooks._SGLANG_PREPARE_HOOKS)
-    prepare_hooks.register_sglang_prepare_hook(hook_a)
-    prepare_hooks.register_sglang_prepare_hook(hook_b)
-    prepare_hooks.register_sglang_prepare_hook(hook_a)
-    assert len(prepare_hooks._SGLANG_PREPARE_HOOKS) == n0 + 2
-    try:
-        run_sglang_prepare_hooks("DeepseekV3ForCausalLM", MagicMock())
-        assert calls == ["a", "b"]
-    finally:
-        prepare_hooks._SGLANG_PREPARE_HOOKS.remove(hook_a)
-        prepare_hooks._SGLANG_PREPARE_HOOKS.remove(hook_b)
-        assert len(prepare_hooks._SGLANG_PREPARE_HOOKS) == n0
+        fake_qwen35_mod.apply_prepare_model_adaptations.assert_not_called()
+    fake_model_cls.assert_called_once()

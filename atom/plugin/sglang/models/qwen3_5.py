@@ -1,47 +1,9 @@
-"""ATOM Qwen3.5 VLM for SGLang external model inference.
-
-Set ``SGLANG_EXTERNAL_MODEL_PACKAGE`` to ``atom.plugin.sglang.models``.
-
-Subclasses SGLang in-tree ``Qwen3_5ForConditionalGeneration`` /
-``Qwen3_5MoeForConditionalGeneration``; language stack is built via
-plugin-local ATOM subclasses prepared for SGLang.
-
-**Weight loading parity (FP8 / packed tensors)**
-
-- Language weights are loaded by ``atom.model_loader.loader.load_model`` (plugin
-  mode), not by SGLang's in-tree ``load_weights``. ``packed_modules_mapping``
-  must stay aligned with SGLang's ``QWEN3_5_PACKED_MODULES_MAPPING`` intent
-  (inverse mapping: HF shard name → fused param + shard id).
-
-- On HIP, SGLang's ``Qwen3_5ForCausalLM.load_weights`` applies
-  ``qwen3_5_gdn_fused_proj.FUSED_PROJ_WEIGHT_MAPPING`` before stacked QKV/MLP
-  mapping. ATOM GDN uses ``in_proj_qkvz`` / ``in_proj_ba`` only; the subset of
-  that table for ``in_proj_qkv*`` / ``in_proj_z`` / ``in_proj_b`` /
-  ``in_proj_a`` is already covered by ``_QWEN35_OOT_PACKED_MODULES_MAPPING``.
-  Checkpoints that expose a single ``in_proj_fused`` tensor (full BF16 fusion)
-  are not supported here—use HF-style split projection keys.
-
-- MoE fused expert slabs: SGLang chunks ``gate_up_proj`` on ``dim=-2``; this
-  module uses ``load_fused_expert_weights`` with orientation detection so both
-  ``[2*half, hidden]`` and ``[hidden, 2*half]`` slabs load correctly (relevant
-  for some FP8 checkpoints).
-
-- After ``super().__init__``, we assign ``quant_config.packed_modules_mapping``
-  when the config supports it, matching ``Qwen3_5ForCausalLM`` so FP8 (and other)
-  quant paths that read ``packed_modules_mapping`` see the same mapping as the
-  in-tree model class.
-
-- ``utils.prepare_hooks._qwen3_prepare_hook`` defaults
-  ``ATOM_SGLANG_USE_NATIVE_AITER_ATTN_BACKEND`` for ``Qwen3_5*`` and
-  ``Qwen3NextForCausalLM`` only (native ``AiterAttnBackend`` vs ATOM override;
-  PR #355) before ``register_ops_to_sglang``. ``apply_prepare_model_adaptations``
-  handles ``Qwen3_5*``-only MoE text-config patch, quant remap / ROCm/ATOM#448 —
-  override with ``=0`` in the environment if needed.
-"""
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
 from __future__ import annotations
 
-import logging
+from contextlib import contextmanager
 from collections.abc import Iterable
 from typing import Any, Optional
 
@@ -49,8 +11,9 @@ import torch
 from torch import nn
 
 from aiter.dist.parallel_state import get_pp_group as _aiter_pp_group
-from sglang.srt.distributed import get_pp_group
-from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.quantization.base_config import (
+    QuantizationConfig as SGLangQuantizationConfig,
+)
 from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     PPProxyTensors,
@@ -61,41 +24,24 @@ from sglang.srt.models.qwen3_5 import (
 )
 
 from atom.model_loader.loader import WeightsMapper
-from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
-from atom.model_ops.moe import FusedMoE
-from atom.model_ops.topK import is_rocm_aiter_fusion_shared_expert_enabled
 from atom.models.qwen3_5 import (
-    Qwen3_5ForCausalLMBase as _CoreQwen35ForCausalLMBase,
-    Qwen3_5DecoderLayer as _CoreQwen35DecoderLayer,
-    Qwen3_5Model as _Qwen3_5ModelCore,
-    Qwen3_5RMSNorm,
-    get_qwen3_5_text_config,
+    Qwen3_5ForCausalLM,
+    Qwen3_5ForCausalLMBase,
+    Qwen3_5Model,
+    Qwen3_5MoeForCausalLM,
+    detect_fused_expert_format,
+    get_fused_expert_mapping,
+    load_fused_expert_weights,
 )
-from atom.models.utils import (
-    IntermediateTensors,
-    extract_layer_index,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
+from atom.models.utils import IntermediateTensors
+from atom.plugin.sglang.attention_backend.attention_gdn import (
+    SGLangGDNForwardContext,
 )
-from atom.plugin.sglang.utils.loader import load_model_in_sglang_plugin_mode
-from atom.plugin.sglang.models.base_model_wrapper import build_atom_model_for_sglang
-from atom.plugin.sglang.models.qwen3_next import Qwen3NextSglangAttention
-from atom.plugin.sglang.utils.gdn_forward_helper import sglang_gdn_bridge
+from atom.plugin.sglang.models.base_model_wrapper import (
+    SGLangForwardBatchMetadata,
+)
 
-logger = logging.getLogger("atom.plugin.sglang.models.qwen3_5")
-
-
-# Inverse of SGLang ``QWEN3_5_PACKED_MODULES_MAPPING`` (HF split names → fused module).
-# Extra keys ``.gate.`` / ``shared_expert_gate`` support ROCm shared-expert fusion naming.
-#
-# SGLang plugin loader uses path-segment matching so ``v_proj``
-# does not match inside ``qkv_proj``, ``in_proj_qkv`` not inside ``in_proj_qkvz``, etc.
-# Dynamic FP8 checkpoints often use fused tensor names; ``(name, None)`` rows use
-# ``MergedColumnParallelLinear.weight_loader`` fused split. Without this, ATOM plugin
-# load corrupts weights vs native SGLang ``CompressedTensorsW8A8Fp8MoE`` and
-# ``shuffle_weight`` fails (e.g. ``1 % 16 == 1``).
-_QWEN35_OOT_PACKED_MODULES_MAPPING = {
+_PACKED_MODULES_MAPPING = {
     "qkv_proj": ("qkv_proj", None),
     "in_proj_qkvz": ("in_proj_qkvz", None),
     "in_proj_ba": ("in_proj_ba", None),
@@ -113,22 +59,47 @@ _QWEN35_OOT_PACKED_MODULES_MAPPING = {
     "shared_expert_gate": ("gate", 1),
 }
 
-_QWEN35_SGLANG_VL_HF_MAPPER = WeightsMapper(
-    orig_to_new_substr={
-        "attn.qkv.": "attn.qkv_proj.",
-    },
-    orig_to_new_prefix={
-        "model.visual.": "visual.",
-        "model.language_model.model.": "model.",
-        "model.language_model.lm_head.": "lm_head.",
-        "model.language_model.": "model.",
-        "lm_head.": "lm_head.",
-    },
-)
+
+_BF16_IN_PROJ_MAPPING = {
+    "in_proj_qkv": ("in_proj_qkvzba", (0, 1, 2)),
+    "in_proj_z": ("in_proj_qkvzba", 3),
+    "in_proj_b": ("in_proj_qkvzba", 4),
+    "in_proj_a": ("in_proj_qkvzba", 5),
+}
+
+
+def _apply_bf16_in_proj_mapping(mapping: dict, atom_config: Any) -> dict:
+    if atom_config.quant_config.global_quant_config.quant_dtype != torch.bfloat16:
+        return mapping
+
+    mapping.pop("in_proj_qkvz", None)
+    mapping.pop("in_proj_ba", None)
+    mapping["in_proj_qkvzba"] = ("in_proj_qkvzba", None)
+    mapping.update(_BF16_IN_PROJ_MAPPING)
+    return mapping
+
+
+def _make_qwen35_hf_mapper(language_model_prefix: str) -> WeightsMapper:
+    # Qwen3.5 uses the same HF checkpoint keys for both paths below, but the
+    # language-model subtree differs: the SGLang outer wrapper nests it under
+    # `model.model.*`, while the ATOM inner model uses `model.*`.
+    return WeightsMapper(
+        orig_to_new_substr={"attn.qkv.": "attn.qkv_proj."},
+        orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "model.language_model.model.": language_model_prefix,
+            "model.language_model.lm_head.": "lm_head.",
+            "model.language_model.": language_model_prefix,
+            "lm_head.": "lm_head.",
+        },
+    )
+
+
+_QWEN35_SGLANG_VL_HF_MAPPER = _make_qwen35_hf_mapper("model.model.")
+_QWEN35_ATOM_HF_MAPPER = _make_qwen35_hf_mapper("model.")
 
 
 def _patch_qwen35_moe_text_for_sparse_moe_block(hf_config: Any) -> None:
-    """HF Qwen3.5 MoE text config often omits fields that Qwen3NextSparseMoeBlock uses."""
     tc = getattr(hf_config, "text_config", None)
     if tc is None:
         tc = hf_config
@@ -141,502 +112,309 @@ def _patch_qwen35_moe_text_for_sparse_moe_block(hf_config: Any) -> None:
 
 
 def remap_qwen35_quant_config_for_sglang_plugin(atom_config: Any) -> None:
-    """Align ``QuantizationConfig`` layer patterns with external-model weight names (vLLM PR #448).
-
-    vLLM plugin calls ``quant_config.remap_layer_name`` in ``model_wrapper`` before
-    building the ATOM model; SGLang external registration must do the same so FP8 layer patterns /
-    ``exclude_layers`` match parameter names after HF→SGLang prefix mapping.
-    """
     atom_config.quant_config.remap_layer_name(
         atom_config.hf_config,
-        packed_modules_mapping=dict(_QWEN35_OOT_PACKED_MODULES_MAPPING),
-        weights_mapper=_QWEN35_SGLANG_VL_HF_MAPPER,
+        packed_modules_mapping=_apply_bf16_in_proj_mapping(
+            dict(_PACKED_MODULES_MAPPING), atom_config
+        ),
+        weights_mapper=_QWEN35_ATOM_HF_MAPPER,
     )
 
 
-_QWEN35_PREPARE_MOE_ARCHES = frozenset(
-    ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
-)
-_QWEN35_PREPARE_REMAP_ARCHES = frozenset(
-    ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5ForConditionalGeneration")
-)
-
-
-class Qwen3_5SglangDecoderLayer(_CoreQwen35DecoderLayer):
-    """Qwen3.5 decoder layer with SGLang-aware full attention."""
-
-    def __init__(
-        self,
-        atom_config,
-        layer_type: str,
-        prefix: str = "",
-        layer_num: int = 0,
-    ) -> None:
-        super().__init__(atom_config, layer_type, prefix, layer_num)
-        if self.layer_type == "full_attention":
-            self.self_attn = Qwen3NextSglangAttention(
-                atom_config,
-                quant_config=atom_config.quant_config,
-                prefix=f"{prefix}.self_attn",
-            )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-        **model_kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-        self_attention_output = torch.empty_like(hidden_states)
-        if self.layer_type == "linear_attention":
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-            )
-        elif self.layer_type == "full_attention":
-            self.self_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-                positions=positions,
-                **model_kwargs,
-            )
-        else:
-            raise ValueError("Invalid layer_type")
-        hidden_states = self_attention_output
-
-        if self.layer_scale:
-            if len(hidden_states.shape) == 2:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype)[0] + 1
-                )
-            else:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype) + 1
-                )
-
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-
-        if self.layer_scale:
-            if len(hidden_states.shape) == 2:
-                hidden_states = hidden_states * (
-                    self.ffn_layer_scale.to(hidden_states.dtype)[0] + 1
-                )
-            else:
-                assert len(hidden_states.shape) == len(self.ffn_layer_scale.shape), (
-                    f"shape must be the same {len(hidden_states.shape)}, "
-                    f"{len(self.ffn_layer_scale.shape)}"
-                )
-                hidden_states = hidden_states * (
-                    self.ffn_layer_scale.to(hidden_states.dtype) + 1
-                )
-
-        return hidden_states, residual
-
-
-class Qwen3_5SglangModel(_Qwen3_5ModelCore):
-    """``Qwen3_5Model`` for SGLang: VLM kwargs, deepstack, and GDN forward-context bridge.
-
-    Implements the forward previously on ``atom.models.qwen3_5.Qwen3_5Model`` so
-    ``atom.models`` stays free of SGLang-specific tensor handling.
-    """
-
-    def __init__(self, *, atom_config, prefix: str = ""):
-        nn.Module.__init__(self)
-        config = get_qwen3_5_text_config(atom_config)
-
-        self.config = config
-        self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
-
-        def get_layer(prefix: str, layer_num: int):
-            return Qwen3_5SglangDecoderLayer(
-                atom_config=atom_config,
-                layer_type=config.layer_types[extract_layer_index(prefix)],
-                prefix=prefix,
-                layer_num=layer_num,
-            )
-
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
-        )
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
-        self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs: Any,
-    ):
-        mkw = dict(model_kwargs)
-        if intermediate_tensors is None:
-            pp = mkw.pop("pp_proxy_tensors", None)
-            if pp is not None:
-                tensors = getattr(pp, "tensors", None)
-                if tensors is not None:
-                    intermediate_tensors = IntermediateTensors(dict(tensors))
-        if inputs_embeds is None:
-            inputs_embeds = mkw.pop("input_embeds", None)
-        input_deepstack = mkw.pop("input_deepstack_embeds", None)
-
-        fb = mkw.get("forward_batch")
-        with sglang_gdn_bridge(fb):
-            if _aiter_pp_group().is_first_rank:
-                if inputs_embeds is not None:
-                    hidden_states = inputs_embeds
-                else:
-                    hidden_states = self.get_input_embeddings(input_ids)
-                residual = None
-            else:
-                assert intermediate_tensors is not None
-                hidden_states = intermediate_tensors["hidden_states"]
-                residual = intermediate_tensors["residual"]
-
-            hs = self.config.hidden_size
-            for local_i, layer in enumerate(
-                self.layers[self.start_layer : self.end_layer]
-            ):
-                hidden_states, residual = layer(
-                    positions, hidden_states, residual, **mkw
-                )
-                layer_num = self.start_layer + local_i
-                if (
-                    input_deepstack is not None
-                    and input_deepstack.numel() > 0
-                    and layer_num < 3
-                ):
-                    sep = hs * layer_num
-                    hidden_states.add_(input_deepstack[:, sep : sep + hs])
-
-            if not _aiter_pp_group().is_last_rank:
-                return IntermediateTensors(
-                    {"hidden_states": hidden_states, "residual": residual}
-                )
-            hidden_states, _ = self.norm(hidden_states, residual)
-            return hidden_states
-
-
 def apply_prepare_model_adaptations(atom_config: Any, model_arch: str) -> None:
-    """Qwen3.5-only hooks for ``prepare_model`` (before ATOM LM build)."""
-    if model_arch in _QWEN35_PREPARE_MOE_ARCHES:
+    if model_arch == "Qwen3_5MoeForConditionalGeneration":
         _patch_qwen35_moe_text_for_sparse_moe_block(atom_config.hf_config)
-    if model_arch in _QWEN35_PREPARE_REMAP_ARCHES:
+    if model_arch in {
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }:
         remap_qwen35_quant_config_for_sglang_plugin(atom_config)
 
 
-def _patch_qwen35_moe_text_config_for_atom(config: Any) -> None:
-    """VLM ``__init__``: same MoE text patch as prepare_model (multimodal root config)."""
-    _patch_qwen35_moe_text_for_sparse_moe_block(config)
-
-
-class _Qwen3_5ForCausalLMSglangBase(_CoreQwen35ForCausalLMBase):
-    """Plugin-local Qwen3.5 LM that reuses core structure with a SGLang model class."""
-
-    language_model_cls = Qwen3_5SglangModel
-
-    def __init__(self, atom_config: Any, prefix: str = ""):
-        config = get_qwen3_5_text_config(atom_config)
-        self.atom_config = atom_config
-        self.quant_config = atom_config.quant_config
-
-        nn.Module.__init__(self)
-        self.config = config
-        self.model = self.language_model_cls(
-            atom_config=atom_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-
-        if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
-    ):
-        return self.model(
+def _forward_qwen35_decoder_stack(
+    decoder_stack: Qwen3_5Model,
+    input_ids: Optional[torch.Tensor],
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
+    input_deepstack_embeds: Optional[torch.Tensor] = None,
+) -> torch.Tensor | IntermediateTensors:
+    if input_deepstack_embeds is None or input_deepstack_embeds.numel() == 0:
+        return decoder_stack(
             input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
-            **kwargs,
         )
 
+    if _aiter_pp_group().is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = decoder_stack.get_input_embeddings(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
 
-class Qwen3_5ForCausalLMSglang(_Qwen3_5ForCausalLMSglangBase):
-    pass
-
-
-class Qwen3_5MoeForCausalLMSglang(_Qwen3_5ForCausalLMSglangBase):
-    def __init__(self, atom_config: Any, prefix: str = ""):
-        config = get_qwen3_5_text_config(atom_config)
-        config.n_shared_experts = 1
-        config.n_routed_experts = config.num_experts
-        super().__init__(atom_config=atom_config, prefix=prefix)
-        self.config = config
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if is_rocm_aiter_fusion_shared_expert_enabled()
-                else 0
-            ),
-        )
-
-
-_QWEN35_SGLANG_ATOM_MODEL_CLS = {
-    "Qwen3_5ForConditionalGeneration": Qwen3_5ForCausalLMSglang,
-    "Qwen3_5MoeForConditionalGeneration": Qwen3_5MoeForCausalLMSglang,
-}
-
-
-def _build_qwen35_atom_model(config: Any) -> nn.Module:
-    model_arch = getattr(config, "architectures", ["unknown"])[0]
-    try:
-        atom_model_cls = _QWEN35_SGLANG_ATOM_MODEL_CLS[model_arch]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported Qwen3.5 SGLang architecture: {model_arch}"
-        ) from exc
-    return build_atom_model_for_sglang(config, atom_model_cls)
-
-
-class _AtomQwen35FlatLanguageStack(nn.Module):
-    """Expose ``embed_tokens`` / ``layers`` / ``norm`` for SGLang VLM."""
-
-    _pending_vlm_root_config: Any = None
-
-    def __init__(
-        self,
-        config: Any,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        del config
-        root = _AtomQwen35FlatLanguageStack._pending_vlm_root_config
-        if root is None:
-            raise RuntimeError(
-                "ATOM Qwen3.5 VLM language stack: missing pending VLM root config"
-            )
-
-        self.pp_group = get_pp_group()
-        self.quant_config = quant_config
-
-        atom_lm = _build_qwen35_atom_model(root)
-        if atom_lm is None:
-            arch = getattr(root, "architectures", ["unknown"])[0]
-            raise ValueError(f"ATOM failed to build language model for {arch}")
-
-        dec = atom_lm.model
-        self.config = dec.config
-        self.vocab_size = dec.vocab_size
-        self.start_layer = dec.start_layer
-        self.end_layer = dec.end_layer
-        self.make_empty_intermediate_tensors = dec.make_empty_intermediate_tensors
-        self.atom_config = atom_lm.atom_config
-
-        if hasattr(atom_lm, "lm_head"):
-            atom_lm._modules.pop("lm_head", None)
-
-        for name, child in dec.named_children():
-            self.add_module(name, child)
-
-        atom_lm._modules.pop("model", None)
-        self._atom_lm_ref = atom_lm
-
-        if hasattr(atom_lm, "get_expert_mapping"):
-            self.get_expert_mapping = atom_lm.get_expert_mapping  # type: ignore[method-assign]
-
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    @torch.no_grad()
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        forward_batch: Optional[ForwardBatch] = None,
-        input_embeds: Optional[torch.Tensor] = None,
-        pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        input_deepstack_embeds: Optional[torch.Tensor] = None,
-        **kwargs: Any,
+    hs = decoder_stack.config.hidden_size
+    for local_i, layer in enumerate(
+        decoder_stack.layers[decoder_stack.start_layer : decoder_stack.end_layer]
     ):
-        model_kwargs: dict[str, Any] = dict(kwargs)
-        if forward_batch is not None:
-            model_kwargs["forward_batch"] = forward_batch
-        if pp_proxy_tensors is not None:
-            model_kwargs["pp_proxy_tensors"] = pp_proxy_tensors
-        if input_deepstack_embeds is not None:
-            model_kwargs["input_deepstack_embeds"] = input_deepstack_embeds
+        hidden_states, residual = layer(positions, hidden_states, residual)
+        layer_num = decoder_stack.start_layer + local_i
+        if (
+            input_deepstack_embeds is not None
+            and input_deepstack_embeds.numel() > 0
+            and layer_num < 3
+        ):
+            sep = hs * layer_num
+            hidden_states.add_(input_deepstack_embeds[:, sep : sep + hs])
 
-        out = Qwen3_5SglangModel.forward(
-            self,
-            input_ids,
-            positions,
-            None,
-            input_embeds,
-            **model_kwargs,
+    if not _aiter_pp_group().is_last_rank:
+        return IntermediateTensors(
+            {"hidden_states": hidden_states, "residual": residual}
         )
-        if isinstance(out, IntermediateTensors):
-            return PPProxyTensors(dict(out.tensors))
-        return out
+    hidden_states, _ = decoder_stack.norm(hidden_states, residual)
+    return hidden_states
 
 
-class Qwen3_5ForConditionalGeneration(_SglQwen35VL):
-    packed_modules_mapping = _QWEN35_OOT_PACKED_MODULES_MAPPING
+_QWEN35_SGLANG_LANGUAGE_MODEL_STACKS: dict[
+    type[Qwen3_5ForCausalLMBase], type[nn.Module]
+] = {}
+
+
+def _get_qwen35_language_model_stack_cls(
+    atom_model_cls: type[Qwen3_5ForCausalLMBase],
+) -> type[nn.Module]:
+    stack_cls = _QWEN35_SGLANG_LANGUAGE_MODEL_STACKS.get(atom_model_cls)
+    if stack_cls is not None:
+        return stack_cls
+
+    class _AtomQwen35LanguageModelAdapter(atom_model_cls):
+        _pending_vlm_root_config: Any = None
+
+        def __init__(
+            self,
+            config: Any,
+            quant_config: Optional[SGLangQuantizationConfig] = None,
+            prefix: str = "",
+        ) -> None:
+            del prefix
+            import atom
+
+            nn.Module.__init__(self)
+            root_config = type(self)._pending_vlm_root_config
+            if root_config is None:
+                root_config = config
+            atom_lm = atom.prepare_model(config=root_config, engine="sglang")
+            if atom_lm is None:
+                arch = getattr(root_config, "architectures", ["unknown"])[0]
+                raise ValueError(f"ATOM failed to build language model for {arch}")
+
+            self.config = atom_lm.config
+            self.quant_config = quant_config or atom_lm.atom_config.quant_config
+            self.atom_config = atom_lm.atom_config
+            self.model = atom_lm.model
+            self.make_empty_intermediate_tensors = (
+                atom_lm.make_empty_intermediate_tensors
+            )
+            # Keep a strong reference so any model-specific helpers on the
+            # underlying ATOM LM remain available for this adapter.
+            self._atom_lm_ref = atom_lm
+
+        @property
+        def embed_tokens(self) -> nn.Module:
+            return self.model.embed_tokens
+
+        @property
+        def layers(self) -> nn.Module:
+            return self.model.layers
+
+        @property
+        def norm(self) -> nn.Module:
+            return self.model.norm
+
+        @property
+        def start_layer(self) -> int:
+            return self.model.start_layer
+
+        @property
+        def end_layer(self) -> int:
+            return self.model.end_layer
+
+        @property
+        def vocab_size(self) -> int:
+            return self.model.vocab_size
+
+        def get_input_embeddings(
+            self, input_ids: Optional[torch.Tensor] = None
+        ) -> torch.Tensor | nn.Module:
+            if input_ids is None:
+                return self.model.embed_tokens
+            return self.model.get_input_embeddings(input_ids)
+
+        def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return self.model.embed_input_ids(input_ids)
+
+        def forward(
+            self,
+            input_ids: Optional[torch.Tensor],
+            positions: torch.Tensor,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            forward_batch: Optional[ForwardBatch] = None,
+            input_embeds: Optional[torch.Tensor] = None,
+            pp_proxy_tensors: Optional[PPProxyTensors] = None,
+            input_deepstack_embeds: Optional[torch.Tensor] = None,
+            save_kv_cache: bool = True,
+            **kwargs: Any,
+        ):
+            kwargs = dict(kwargs)
+            metadata = SGLangForwardBatchMetadata.build(
+                forward_batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                save_kv_cache=save_kv_cache,
+            )
+            if inputs_embeds is None:
+                inputs_embeds = input_embeds
+            if inputs_embeds is None:
+                inputs_embeds = kwargs.pop("inputs_embeds", None)
+            if intermediate_tensors is None:
+                intermediate_tensors = (
+                    SGLangForwardBatchMetadata.to_intermediate_tensors(
+                        pp_proxy_tensors,
+                        metadata,
+                    )
+                )
+            del kwargs
+            # This custom SGLang Qwen3.5 stack bypasses
+            # `_AtomCausalLMBaseForSglang.forward`, so it must bind both the
+            # generic forward-batch metadata and the GDN bridge locally.
+            with SGLangForwardBatchMetadata.bind(metadata):
+                with SGLangGDNForwardContext.bind(metadata):
+                    out = _forward_qwen35_decoder_stack(
+                        self.model,
+                        input_ids,
+                        positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        input_deepstack_embeds=input_deepstack_embeds,
+                    )
+            if isinstance(out, IntermediateTensors):
+                return PPProxyTensors(dict(out.tensors))
+            return out
+
+    _QWEN35_SGLANG_LANGUAGE_MODEL_STACKS[atom_model_cls] = (
+        _AtomQwen35LanguageModelAdapter
+    )
+    return _AtomQwen35LanguageModelAdapter
+
+
+class _Qwen3_5ConditionalGenerationSglangBase:
+    packed_modules_mapping = _PACKED_MODULES_MAPPING
+    atom_language_model_cls: type[Qwen3_5ForCausalLMBase] = Qwen3_5ForCausalLM
+    hf_to_sglang_mapper = _QWEN35_SGLANG_VL_HF_MAPPER
+
+    def _prepare_sglang_root_config(self, config: Any) -> None:
+        del config
 
     def __init__(
         self,
         config: Any,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: Optional[SGLangQuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        _AtomQwen35FlatLanguageStack._pending_vlm_root_config = config
+        self._prepare_sglang_root_config(config)
+        stack_cls = _get_qwen35_language_model_stack_cls(
+            type(self).atom_language_model_cls
+        )
+        stack_cls._pending_vlm_root_config = config
         try:
             super().__init__(
                 config,
                 quant_config,
                 prefix,
-                language_model_cls=_AtomQwen35FlatLanguageStack,
+                language_model_cls=stack_cls,
             )
         finally:
-            _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
+            stack_cls._pending_vlm_root_config = None
+        self.language_model = self.model
         self.atom_config = self.model.atom_config
+        self.packed_modules_mapping = _apply_bf16_in_proj_mapping(
+            dict(type(self).packed_modules_mapping), self.atom_config
+        )
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
         if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = self.packed_modules_mapping
-        logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return load_model_in_sglang_plugin_mode(
+    def _load_weights_in_plugin_mode(
+        self,
+        *,
+        weights_mapper: Optional[WeightsMapper] = None,
+        load_fused_expert_weights_fn=None,
+    ) -> set[str]:
+        from atom.model_loader.loader import load_model_in_plugin_mode
+
+        return load_model_in_plugin_mode(
             model=self,
             config=self.atom_config,
             prefix="",
-            weights_mapper=_QWEN35_SGLANG_VL_HF_MAPPER,
+            weights_mapper=weights_mapper,
+            load_fused_expert_weights_fn=load_fused_expert_weights_fn,
+        )
+
+    @contextmanager
+    def _maybe_disable_shared_expert_fusion_for_load(self):
+        # Some Qwen3.5 FP8 checkpoints keep `shared_expert.*` as standalone
+        # modules. In that case, the generic loader must not rewrite those keys
+        # into `mlp.experts.<n_routed_experts>.*` during load.
+        has_standalone_shared_expert = any(
+            ".shared_expert." in name for name, _ in self.named_parameters()
+        )
+        if not has_standalone_shared_expert:
+            yield
+            return
+
+        import atom.model_loader.loader as atom_loader
+
+        original = atom_loader.is_rocm_aiter_fusion_shared_expert_enabled
+        atom_loader.is_rocm_aiter_fusion_shared_expert_enabled = lambda: False
+        try:
+            yield
+        finally:
+            atom_loader.is_rocm_aiter_fusion_shared_expert_enabled = original
+
+
+class Qwen3_5ForConditionalGeneration(
+    _Qwen3_5ConditionalGenerationSglangBase, _SglQwen35VL
+):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        del weights
+        return self._load_weights_in_plugin_mode(
+            weights_mapper=self.hf_to_sglang_mapper
         )
 
 
-class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
-    packed_modules_mapping = _QWEN35_OOT_PACKED_MODULES_MAPPING
+class Qwen3_5MoeForConditionalGeneration(
+    _Qwen3_5ConditionalGenerationSglangBase, _SglQwen35MoeVL
+):
+    atom_language_model_cls = Qwen3_5MoeForCausalLM
 
-    def __init__(
-        self,
-        config: Any,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        _patch_qwen35_moe_text_config_for_atom(config)
-        _AtomQwen35FlatLanguageStack._pending_vlm_root_config = config
-        try:
-            super().__init__(
-                config,
-                quant_config,
-                prefix,
-                language_model_cls=_AtomQwen35FlatLanguageStack,
-            )
-        finally:
-            _AtomQwen35FlatLanguageStack._pending_vlm_root_config = None
-        self.atom_config = self.model.atom_config
-        if quant_config is not None and hasattr(quant_config, "packed_modules_mapping"):
-            quant_config.packed_modules_mapping = self.packed_modules_mapping
-        logger.info("Initialized ATOM-backed %s", self.__class__.__name__)
+    def _prepare_sglang_root_config(self, config: Any) -> None:
+        _patch_qwen35_moe_text_for_sparse_moe_block(config)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
     def detect_fused_expert_format(self, weight_name: str) -> bool:
-        return "experts.gate_up_proj" in weight_name or (
-            "experts.down_proj" in weight_name
-            and ".experts." in weight_name
-            and weight_name.count(".experts.") == 1
-        )
+        return detect_fused_expert_format(weight_name)
 
     def get_fused_expert_mapping(self) -> list[tuple[str, str, str]]:
-        return [
-            ("experts.w13_weight", "experts.gate_up_proj", "w1"),
-            ("experts.w2_weight", "experts.down_proj", "w2"),
-        ]
-
-    @staticmethod
-    def _expert_gate_up_to_w1_w3(
-        fused: torch.Tensor, half: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One expert's fused gate+up → ``w1`` / ``w3`` rows expected by ``FusedMoE``.
-
-        ATOM stores ``w13_weight[e]`` as ``[2*half, hidden]`` (gate then up on dim 0).
-        Checkpoints may use the same layout or ``[hidden, 2*half]``.
-        """
-        if fused.dim() > 2:
-            fused = fused.reshape(fused.shape[0], -1)
-        rows, cols = fused.shape
-        two_h = 2 * half
-        if rows == two_h:
-            return fused.narrow(0, 0, half), fused.narrow(0, half, half)
-        if cols == two_h:
-            t = fused.transpose(0, 1).contiguous()
-            return t.narrow(0, 0, half), t.narrow(0, half, half)
-        raise ValueError(
-            f"gate_up_proj expert slab shape {tuple(fused.shape)}: expected "
-            f"one dim == {two_h} (2*half, half={half})"
-        )
-
-    @staticmethod
-    def _gate_up_halves_for_split(half_param: int, tp_size: int) -> list[int]:
-        """Order matters: prefer full-checkpoint half before TP-local layout.
-
-        HF stores ``gate_up_proj`` as ``[E, 2 * moe_intermediate, hidden]``
-        (global). ``w13_weight`` uses ``2 * intermediate_size_per_partition``
-        per rank, so ``half_param * tp_size`` matches the checkpoint fused dim.
-        """
-        out: list[int] = []
-        if tp_size > 1:
-            out.append(half_param * tp_size)
-        out.append(half_param)
-        return out
-
-    def _expert_gate_up_to_w1_w3_multi(
-        self, fused: torch.Tensor, half_candidates: list[int]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        last: Optional[ValueError] = None
-        for h in half_candidates:
-            try:
-                return self._expert_gate_up_to_w1_w3(fused, h)
-            except ValueError as e:
-                last = e
-        assert last is not None
-        raise last
+        return get_fused_expert_mapping()
 
     def load_fused_expert_weights(
         self,
@@ -647,47 +425,25 @@ class Qwen3_5MoeForConditionalGeneration(_SglQwen35MoeVL):
         shard_id: str,
         num_experts: int,
     ) -> bool:
-        # ``name`` is the mapped param path (…w13_weight); ``original_name`` is the
-        # checkpoint key (…gate_up_proj). Only the latter contains gate_up_proj.
-        param = params_dict[name]
-        weight_loader = param.weight_loader
-        loaded_local_expert = False
-
-        if "gate_up_proj" in original_name:
-            half_param = param.data[0].shape[0] // 2
-            moe = getattr(weight_loader, "__self__", None)
-            tp_size = int(getattr(moe, "tp_size", 1) or 1)
-            half_candidates = self._gate_up_halves_for_split(half_param, tp_size)
-            w = loaded_weight
-            for expert_id in range(num_experts):
-                slab = w[expert_id]
-                w1_slab, w3_slab = self._expert_gate_up_to_w1_w3_multi(
-                    slab, half_candidates
-                )
-                weight_loader(param, w1_slab, name, "w1", expert_id)
-                weight_loader(param, w3_slab, name, "w3", expert_id)
-                loaded_local_expert = True
-        else:
-            for expert_id in range(num_experts):
-                weight_loader(
-                    param,
-                    loaded_weight[expert_id],
-                    name,
-                    shard_id,
-                    expert_id,
-                )
-                loaded_local_expert = True
-
-        return loaded_local_expert
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return load_model_in_sglang_plugin_mode(
-            model=self,
-            config=self.atom_config,
-            prefix="",
-            weights_mapper=_QWEN35_SGLANG_VL_HF_MAPPER,
-            load_fused_expert_weights_fn=self.load_fused_expert_weights,
+        return load_fused_expert_weights(
+            original_name,
+            name,
+            params_dict,
+            loaded_weight,
+            shard_id,
+            num_experts,
         )
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        del weights
+        with self._maybe_disable_shared_expert_fusion_for_load():
+            return self._load_weights_in_plugin_mode(
+                weights_mapper=self.hf_to_sglang_mapper,
+                load_fused_expert_weights_fn=self.load_fused_expert_weights,
+            )
 
-EntryClass = [Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration]
+
+# SGLang discovers these multimodal wrappers from this module's `EntryClass`.
+# They are not covered by `base_model_wrapper.py`, whose generated entries only
+# handle the plain causal-LM architectures in `_MODEL_ARCH_SPECS`.
+EntryClass = [Qwen3_5ForConditionalGeneration, Qwen3_5MoeForConditionalGeneration]
