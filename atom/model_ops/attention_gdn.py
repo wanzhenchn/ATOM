@@ -20,36 +20,6 @@ from atom.utils.forward_context import ForwardContext, get_forward_context
 from torch import nn
 from aiter.dist.parallel_state import get_tp_group
 
-# Reused conv workspace for SGLang row-major mamba buffers.
-# Keep at most one cached workspace per (device, dtype), and avoid promoting
-# larger burst-shaped allocations into the global cache. This keeps a steady
-# reusable buffer for common traffic patterns without pinning a very large
-# tensor after a transient spike.
-_sglang_conv_work_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-
-
-def _sglang_conv_work_tensor(raw: torch.Tensor) -> torch.Tensor:
-    key = (raw.device, raw.dtype)
-    n, d, w = raw.shape
-    need_stride = (d * w, 1, d)
-    cached = _sglang_conv_work_cache.get(key)
-    if (
-        cached is not None
-        and cached.shape == raw.shape
-        and cached.stride() == need_stride
-    ):
-        return cached
-
-    t = torch.empty_strided(
-        (n, d, w),
-        need_stride,
-        dtype=raw.dtype,
-        device=raw.device,
-    )
-    if cached is None or t.numel() <= cached.numel():
-        _sglang_conv_work_cache[key] = t
-    return t
-
 
 @triton.jit
 def fused_gdn_gating_kernel(
@@ -187,29 +157,15 @@ class GatedDeltaNet(nn.Module):
         from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
 
         fwd_ctx: ForwardContext = get_forward_context()
-        am = fwd_ctx.attn_metadata
-        if isinstance(am, dict):
-            return core_attn_out
-        else:
-            gdn_metadata: GDNAttentionMetadata = getattr(am, "gdn_metadata", None)
+        gdn_metadata: GDNAttentionMetadata = getattr(
+            fwd_ctx.attn_metadata, "gdn_metadata", None
+        )
         if gdn_metadata is None:
             return core_attn_out
 
         gdn_cache = fwd_ctx.kv_cache_data
-        kv_entry = gdn_cache[f"layer_{self.layer_num}"]
-        conv_state = kv_entry.k_cache
-        ssm_state = kv_entry.v_cache
-        conv_layout = getattr(kv_entry, "mamba_conv_layout", "atom")
-        conv_sglang_copy_dst = None
-
-        if conv_layout == "sglang_rowmajor":
-            # SGLang stores conv cache as [slot, conv_dim, kernel-1] row-major,
-            # while the ATOM kernel expects stride(-2)==1 on [slot, D, W].
-            conv_sglang_copy_dst = conv_state
-            conv_state = _sglang_conv_work_tensor(conv_state)
-            conv_state.copy_(conv_sglang_copy_dst)
-        else:
-            conv_state = conv_state.transpose(-1, -2)
+        conv_state = gdn_cache[f"layer_{self.layer_num}"].k_cache
+        ssm_state = gdn_cache[f"layer_{self.layer_num}"].v_cache
 
         has_initial_state = gdn_metadata.has_initial_state
         spec_query_start_loc = gdn_metadata.spec_query_start_loc
@@ -221,6 +177,15 @@ class GatedDeltaNet(nn.Module):
         non_spec_state_indices_tensor = (
             gdn_metadata.non_spec_state_indices_tensor
         )  # noqa: E501
+
+        # `causal_conv1d_*` expects the logical shape [slot, conv_dim, state_len].
+        # ModelRunner stores [slot, state_len, conv_dim], so it needs the
+        # transpose below. SGLang already provides [slot, conv_dim, state_len],
+        # and the Triton kernel consumes the original conv_state strides directly.
+        if conv_state.size(1) != self.conv1d.weight.size(
+            0
+        ):  # transpose for ModelRunner
+            conv_state = conv_state.transpose(-1, -2)
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         num_accepted_tokens = gdn_metadata.num_accepted_tokens
@@ -408,8 +373,5 @@ class GatedDeltaNet(nn.Module):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-
-        if conv_sglang_copy_dst is not None:
-            conv_sglang_copy_dst.copy_(conv_state)
 
         return core_attn_out

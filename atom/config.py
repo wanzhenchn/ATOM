@@ -39,9 +39,6 @@ class KVCacheTensor:
     v_cache: torch.Tensor = torch.tensor([])
     k_scale: torch.Tensor = None
     v_scale: torch.Tensor = None
-    # GDN conv state: "atom" matches ModelRunner mamba layout; "sglang_rowmajor" is
-    # SGLang MambaPool conv [slot, conv_dim, kernel-1] (row-major on last two dims).
-    mamba_conv_layout: str = "atom"
 
 
 @dataclass

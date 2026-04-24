@@ -69,7 +69,6 @@ class SGLangGDNForwardContext:
                 v_cache=layer_cache.temporal,
                 k_scale=None,
                 v_scale=None,
-                mamba_conv_layout="sglang_rowmajor",
             )
         return out
 
