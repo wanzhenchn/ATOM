@@ -220,9 +220,10 @@ def _get_qwen35_language_model_stack_cls(
             self.make_empty_intermediate_tensors = (
                 atom_lm.make_empty_intermediate_tensors
             )
-            # Keep a strong reference so any model-specific helpers on the
-            # underlying ATOM LM remain available for this adapter.
-            self._atom_lm_ref = atom_lm
+            # Keep a strong reference to the full ATOM LM without registering it
+            # as another submodule tree, so parameter names still flow through
+            # the SGLang wrapper's expected `model.*` / `lm_head.*` prefixes.
+            self.__dict__["_atom_lm"] = atom_lm
 
         @property
         def embed_tokens(self) -> nn.Module:
@@ -247,6 +248,10 @@ def _get_qwen35_language_model_stack_cls(
         @property
         def vocab_size(self) -> int:
             return self.model.vocab_size
+
+        @property
+        def lm_head(self) -> nn.Module:
+            return self._atom_lm.lm_head
 
         def get_input_embeddings(
             self, input_ids: Optional[torch.Tensor] = None
@@ -289,9 +294,6 @@ def _get_qwen35_language_model_stack_cls(
                     )
                 )
             del kwargs
-            # This custom SGLang Qwen3.5 stack bypasses
-            # `_AtomCausalLMBaseForSglang.forward`, so it must bind both the
-            # generic forward-batch metadata and the GDN bridge locally.
             with SGLangForwardBatchMetadata.bind(metadata):
                 with SGLangGDNForwardContext.bind(metadata):
                     out = _forward_qwen35_decoder_stack(
@@ -342,6 +344,7 @@ class _Qwen3_5ConditionalGenerationSglangBase:
             stack_cls._pending_vlm_root_config = None
         self.language_model = self.model
         self.atom_config = self.model.atom_config
+        self.lm_head = self.model.lm_head
         self.packed_modules_mapping = _apply_bf16_in_proj_mapping(
             dict(type(self).packed_modules_mapping), self.atom_config
         )
