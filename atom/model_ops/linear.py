@@ -383,9 +383,8 @@ class LinearBase(nn.Module):
                 self.quant_type == QuantType.per_Token
                 and self.params_dtype == dtypes.fp8
             ) or (self.quant_type in [QuantType.per_1x32, QuantType.per_1x128]):
-                if self.weight.dim() != 2:
-                    return
-                shuffle_weights(self.weight)
+                if self.weight.dim() == 2:
+                    shuffle_weights(self.weight)
                 # self.weight_scale.data = fp4_utils.e8m0_shuffle(self.weight_scale.data)
         # shuffle weight scale once so no reshuffling for every gemm
         if self.quant_type == QuantType.per_1x32:

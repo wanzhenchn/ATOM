@@ -182,9 +182,8 @@ class GatedDeltaNet(nn.Module):
         # ModelRunner stores [slot, state_len, conv_dim], so it needs the
         # transpose below. SGLang already provides [slot, conv_dim, state_len],
         # and the Triton kernel consumes the original conv_state strides directly.
-        if conv_state.size(1) != self.conv1d.weight.size(
-            0
-        ):  # transpose for ModelRunner
+        if conv_state.size(1) != self.conv1d.weight.size(0):
+            # transpose for ModelRunner
             conv_state = conv_state.transpose(-1, -2)
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
